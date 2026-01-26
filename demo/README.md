@@ -8,7 +8,7 @@ This demo shows how to integrate the Swarm ID library into a dApp for authentica
 
 ## Files
 
-- **demo.html** - Demo dApp that uses `SwarmIdClient` from the library (built as `index.html`)
+- **index.html** - Demo dApp that uses `SwarmIdClient` from the library
 - **build.js** - Build script that bundles the demo with the library
 
 ## Using the Library
@@ -41,21 +41,22 @@ This will:
 
 ## Deployment
 
-The demo is deployed to **swarm-demo.snaha.net** using DigitalOcean App Platform. The deployment configuration is in `.do-app-demo.yaml` at the project root.
+The demo is deployed to **swarm-demo.snaha.net** using DigitalOcean App Platform. The deployment configuration is in `.do/swarm-demo-app.yaml`.
 
 ## Local Development
 
-For local development, you need:
-- SSL certificates for `swarm-app.local` and `swarm-id.local`
-- `/etc/hosts` entries for both domains
-- HTTPS servers running on ports 8080 and 8081
+From the project root:
 
-Start the servers from project root:
 ```bash
-./start-servers.sh
+pnpm install
+pnpm dev
 ```
 
-Then access the demo at: `https://swarm-app.local:8080/demo/`
+Then open http://localhost:3000
+
+No HTTPS or certificates required - `localhost` is a secure context.
+
+**Note:** Safari is not supported for local development.
 
 ## How It Works
 
@@ -140,16 +141,12 @@ pnpm install
 pnpm build:swarm-demo
 ```
 
-### CORS errors in local development
-
-Ensure you're accessing via the correct domains (`swarm-app.local` and `swarm-id.local`), not `localhost`.
-
 ### Authentication not working
 
-1. Check browser console for errors in both the demo and identity site
+1. Check browser console for errors
 2. Verify the identity site iframe can load (check network tab)
-3. Clear localStorage and cookies, then try again
-4. Ensure both sites are served over HTTPS in local development
+3. Clear localStorage and try again
+4. Allow popups for localhost in browser settings
 
 ## License
 

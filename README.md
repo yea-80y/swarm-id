@@ -12,7 +12,7 @@ This monorepo implements a cross-browser compatible authentication and identity 
 
 ## Architecture
 
-The project uses an OAuth-style popup authentication flow that works across all browsers (Chrome, Firefox, Safari) without requiring the Storage Access API.
+The project uses an OAuth-style popup authentication flow that works across all browsers (Chrome, Firefox, Safari) using the Storage Access API.
 
 **Key Innovation**: The popup-based authentication allows dApps to securely derive app-specific secrets from a master identity, with browser-enforced storage partitioning providing cross-app isolation.
 
@@ -66,7 +66,7 @@ pnpm build:swarm-id      # Builds lib + identity UI
 **demo/build/** (Demo App)
 ```
 demo/build/
-├── index.html          # Demo app (renamed from demo.html during build)
+├── index.html          # Demo app
 └── lib/                # Library files (~8MB with source maps)
     ├── swarm-id-client.js
     ├── swarm-id-proxy.js
@@ -87,104 +87,34 @@ See [lib/README.md](./lib/README.md) for detailed library documentation.
 
 ## Local Development Setup
 
-### Prerequisites
-
-1. **Install mkcert** (for local HTTPS certificates)
-
-   On Linux:
-   ```bash
-   wget https://github.com/FiloSottile/mkcert/releases/download/v1.4.4/mkcert-v1.4.4-linux-amd64
-   chmod +x mkcert-v1.4.4-linux-amd64
-   sudo mv mkcert-v1.4.4-linux-amd64 /usr/local/bin/mkcert
-   ```
-
-   On macOS:
-   ```bash
-   brew install mkcert
-   ```
-
-2. **Generate SSL certificates**
-
-   ```bash
-   # Install the local CA
-   mkcert -install
-
-   # Generate certificates for local domains
-   mkcert swarm-app.local swarm-id.local
-   ```
-
-   This will create:
-   - `swarm-app.local+1.pem` (certificate)
-   - `swarm-app.local+1-key.pem` (private key)
-
-3. **Configure /etc/hosts**
-
-   Add the following entries to `/etc/hosts`:
-   ```
-   127.0.0.1  swarm-app.local
-   127.0.0.1  swarm-id.local
-   ```
-
-   Quick command (Linux/macOS):
-   ```bash
-   sudo bash -c 'echo "" >> /etc/hosts && echo "# Swarm local development domains" >> /etc/hosts && echo "127.0.0.1  swarm-app.local" >> /etc/hosts && echo "127.0.0.1  swarm-id.local" >> /etc/hosts'
-   ```
-
-### Starting the Development Servers
-
-The project includes two Node.js HTTPS servers that serve content on different domains to simulate production cross-origin behavior.
-
-#### Quick Start (no build required!)
+### Quick Start
 
 ```bash
-# 1. Install and build library
 pnpm install
-cd lib && pnpm build
-
-# 2. Start both HTTPS servers
-./start-servers.sh
+pnpm dev
 ```
 
-This starts:
-- **server-app.js** on `https://swarm-app.local:8080` - serves demo files
-- **server-id.js** on `https://swarm-id.local:8081` - serves identity UI
+Open http://localhost:3000 - that's it!
 
-**Library serving:** Both servers map `/lib/*` → `lib/dist/*` automatically, so no build step needed for local development!
+- Demo app runs on port 3000
+- Identity UI runs on port 5174
+- No HTTPS, certificates, or custom domains required (`localhost` is a secure context)
 
-**Optional:** Build SvelteKit UI for full experience:
-```bash
-cd swarm-ui && pnpm build
-```
+**Note:** Safari is not supported for local development due to strict storage partitioning.
 
-#### Development Mode (with hot reload)
-
-For SvelteKit development with hot module replacement:
+### Development Mode (with hot reload)
 
 ```bash
-# Terminal 1: Build library in watch mode (optional)
-cd lib
-pnpm build:watch
-
-# Terminal 2: Start SvelteKit dev server
-cd swarm-ui
+# Start both demo and identity UI
 pnpm dev
 
-# Terminal 3: Start HTTPS proxy servers
-./start-servers-dev.sh
+# Or start individually
+pnpm dev:swarm-ui    # Identity UI on port 5174
+pnpm dev:demo        # Demo on port 3000
+pnpm dev:lib         # Library watch mode (rebuilds on changes)
 ```
 
-The dev mode setup:
-- **server-app.js** serves demo files from `demo/` (not build)
-- **server-id.js** proxies to SvelteKit dev server (`localhost:5173`)
-- Library changes require rebuild (use `pnpm build:watch`)
-- HTML/CSS changes are served directly from disk
-
-**Custom proxy target:**
-```bash
-PROXY_TARGET=http://localhost:3000 ./start-servers-dev.sh
-```
-
-#### Testing with Real Domains (SSH Tunnel)
+### Testing with Real Domains (SSH Tunnel)
 
 To test storage partitioning behavior with real TLS certificates (as in production), you can use SSH tunnels to a VPS with nginx.
 
@@ -206,14 +136,14 @@ Your VPS (nginx + HTTPS)              Your Local Machine
 
 **Local usage:**
 ```bash
-# Terminal 1: Start demo server (HTTP on port 18080)
-node server-app.js
+# Terminal 1: Start demo server
+pnpm dev:demo
 
 # Terminal 2: Start SvelteKit dev server with allowed hosts
-VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=id.yourdomain.com pnpm --filter swarm-ui dev
+VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=id.yourdomain.com pnpm dev:swarm-ui
 
 # Terminal 3: Open SSH tunnel
-ssh -R 18080:localhost:18080 -R 5174:localhost:5174 user@your-vps
+ssh -R 18080:localhost:3000 -R 5174:localhost:5174 user@your-vps
 ```
 
 **Note:** The `VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` environment variable is required when accessing the Vite dev server through a foreign hostname. Without it, Vite will reject requests from the tunneled domain.
@@ -230,58 +160,6 @@ The `?idDomain=` parameter tells the demo which identity service to use. This al
 - If you change library code, rebuild it: `cd lib && pnpm build`
 - Use `cd lib && pnpm build:watch` for automatic rebuilds during development
 
-#### Server Details
-
-**server-app.js** (`https://swarm-app.local:8080`)
-- Serves the demo dApp pages
-- Default page: `demo-iframe-storage.html`
-- Includes CORS headers for cross-origin requests
-- Supports all common file types (HTML, JS, CSS, JSON, images)
-
-**server-id.js** (`https://swarm-id.local:8081`)
-- **Production mode**: Serves built SvelteKit app from `swarm-ui/build/`
-- **Dev mode** (`PROXY_TARGET` set): Proxies to dev server (e.g., `localhost:5173`)
-- Always serves `/demo/` and `/lib/` files from disk
-- Includes Service Worker support with proper headers
-- CORS configured for `swarm-app.local`
-
-Both servers:
-- Use HTTPS with mkcert-generated certificates
-- Log all requests with timestamps
-- Automatically handle MIME types
-- Listen on `127.0.0.1` (localhost only)
-
-### Testing the Setup
-
-1. **Quick start** (just library):
-   ```bash
-   cd lib && pnpm build   # Build library once
-   ./start-servers.sh     # Start servers
-   ```
-
-2. **Full experience** (with SvelteKit UI):
-   ```bash
-   pnpm build            # Build everything
-   ./start-servers.sh    # Start servers
-   ```
-
-3. Open demos in your browser:
-   - **Demo App**: `https://swarm-app.local:8080/` (serves demo/demo.html)
-   - **Identity UI**: `https://swarm-id.local:8081/`
-
-4. **Accept browser security warnings**
-   - Self-signed certificates trigger warnings
-   - This is safe for local development
-   - Click "Advanced" → "Accept Risk and Continue"
-   - Accept warnings for BOTH domains (swarm-app.local and swarm-id.local)
-
-5. Test the authentication flow:
-   - Click "Login with Swarm ID"
-   - Popup opens on `swarm-id.local`
-   - Complete authentication
-   - Popup closes and you're authenticated
-   - Try uploading/downloading data
-
 ## Project Structure
 
 ```
@@ -291,11 +169,9 @@ Both servers:
 │   ├── dist/             # Built library files (ES6 modules)
 │   └── README.md         # Library documentation
 ├── demo/                 # Demo app package
-│   ├── demo.html         # Library demo HTML
+│   ├── index.html        # Library demo HTML
 │   ├── build.js          # Build script (copies lib, injects config)
 │   └── build/            # Build output (deployed to swarm-demo.snaha.net)
-│       ├── index.html    # Demo app (renamed from demo.html)
-│       └── lib/          # Library files (~8MB)
 ├── swarm-ui/             # SvelteKit identity management UI
 │   ├── src/              # SvelteKit source code
 │   │   └── routes/       # SvelteKit routes including /proxy and /connect
@@ -304,14 +180,7 @@ Both servers:
 │   ├── src/content/docs/ # Documentation pages (MDX)
 │   └── dist/             # Built static site
 ├── bee-js/               # bee-js library (linked dependency)
-├── swarm-id-build/       # Build output (deployed to swarm-id.snaha.net)
-│   ├── [SvelteKit app]   # SvelteKit production files (includes /proxy and /connect routes)
-│   └── lib/              # Library files (~8MB)
-├── server-app.js         # Local HTTPS server for swarm-app.local:8080
-├── server-id.js          # Local HTTPS server for swarm-id.local:8081
-├── start-servers.sh      # Start both servers (production mode)
-├── start-servers-dev.sh  # Start both servers (dev mode with proxy)
-└── swarm-app.local+1*.pem  # SSL certificates (mkcert)
+└── swarm-id-build/       # Build output (deployed to swarm-id.snaha.net)
 ```
 
 ### Key Build Artifacts
@@ -356,52 +225,20 @@ pnpm preview:docs
 
 ## Development Workflow
 
-### Quick Start
-
-```bash
-# 1. One-time setup
-mkcert -install
-mkcert swarm-app.local swarm-id.local
-sudo bash -c 'echo "127.0.0.1 swarm-app.local swarm-id.local" >> /etc/hosts'
-
-# 2. Install and build
-pnpm install
-cd lib && pnpm build   # Build library
-cd ..
-
-# 3. Start servers
-./start-servers.sh
-
-# 4. Open browser
-# Visit: https://swarm-app.local:8080/demo.html
-# Accept security warnings for both domains
-```
-
-**With SvelteKit development:**
-```bash
-# Terminal 1: SvelteKit dev server with hot reload
-cd swarm-ui && pnpm dev
-
-# Terminal 2: HTTPS proxy servers
-./start-servers-dev.sh
-```
-
 ### Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Browser: https://swarm-app.local:8080                  │
+│  Browser: http://localhost:3000 (Demo App)              │
 │  ┌────────────────────────────────────────────────┐     │
-│  │ Demo HTML (server-app.js)                      │     │
+│  │ Demo HTML                                       │     │
 │  │                                                 │     │
 │  │  ┌─────────────────────────────────────────┐   │     │
-│  │  │ <iframe src="https://swarm-id.local">   │   │     │
+│  │  │ <iframe src="http://localhost:5174">    │   │     │
 │  │  │                                          │   │     │
-│  │  │ swarm-id.local:8081 (server-id.js)      │   │     │
-│  │  │   ↓ proxies to ↓                        │   │     │
-│  │  │ localhost:5173 (pnpm dev)               │   │     │
-│  │  │   - Hot reload enabled                  │   │     │
-│  │  │   - SvelteKit UI                        │   │     │
+│  │  │ Identity UI (SvelteKit)                 │   │     │
+│  │  │   - Proxy for Bee API calls             │   │     │
+│  │  │   - Auth popup handler                  │   │     │
 │  │  └─────────────────────────────────────────┘   │     │
 │  └────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────┘
@@ -411,36 +248,26 @@ cd swarm-ui && pnpm dev
 
 - **TypeScript Execution**: Use `pnpx tsx` instead of `npx ts-node` to run TypeScript files
 - **Browser DevTools**: Check Application → Storage to verify storage partitioning
-- **CORS Issues**: Make sure you're accessing via the correct domain (not `localhost`)
-- **Certificate Issues**: Regenerate certificates with `mkcert` if browsers reject them
 - **Hot Reload**: Changes in `swarm-ui/src/` will automatically reload in the browser
 - **Debugging**: Use browser DevTools on both the parent page and the iframe
 
 ## Troubleshooting
 
-### Servers won't start
-- Check if ports 8080 and 8081 are already in use: `lsof -i :8080 -i :8081`
-- Ensure certificate files exist and are readable
-
-### Cannot access swarm-app.local
-- Verify `/etc/hosts` configuration: `grep swarm /etc/hosts`
-- Clear browser DNS cache or restart browser
-- Try ping: `ping swarm-app.local`
-
-### Browser rejects certificates
-- Reinstall mkcert CA: `mkcert -install`
-- Regenerate certificates: `mkcert swarm-app.local swarm-id.local`
-- Check certificate files exist in project root
+### Demo not loading
+- Check if ports 3000 and 5174 are already in use: `lsof -i :3000 -i :5174`
+- Ensure both servers are running: `pnpm dev`
 
 ### Authentication popup blocked
-- Allow popups for `swarm-app.local` in browser settings
+- Allow popups for localhost in browser settings
 - Ensure popup is triggered by user action (not programmatically)
 
-### Dev mode shows "502 Bad Gateway"
-- Make sure `pnpm dev` is running in `swarm-ui/`
-- Verify the dev server is running on the correct port (default: 5173)
-- Check `PROXY_TARGET` environment variable if using custom port
-- Restart both the dev server and proxy servers
+### Changes not reflecting
+- Library changes: restart `pnpm dev:lib` or rebuild
+- SvelteKit changes: automatic hot reload
+
+### Safari not working
+- Safari is not supported for local development due to strict storage partitioning
+- Use Chrome or Firefox instead
 
 ## License
 
