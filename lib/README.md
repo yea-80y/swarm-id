@@ -199,7 +199,7 @@ Options:
 - `initialize()` - Initialize the client and embed iframe
 - `getAuthIframe()` - Get the auth iframe element
 - `checkAuthStatus()` - Check authentication status
-- `connect()` - Open authentication popup programmatically
+- `connect()` - Open authentication popup programmatically (see [Browser Compatibility](#browser-compatibility-and-storage-access))
 - `disconnect()` - Disconnect and clear authentication data
 - `getConnectionInfo()` - Get connection info including upload capability
 
@@ -295,6 +295,41 @@ The library uses postMessage for secure cross-origin communication with Zod sche
 - **Partitioned Storage** - Secrets isolated per (iframe-origin, parent-origin) pair
 - **Master Key Protection** - Master key never leaves first-party context
 - **Type-safe Messages** - Zod schema validation on all messages
+
+## Browser Compatibility and Storage Access
+
+There are two ways to trigger authentication:
+
+1. **Iframe button** - User clicks the button rendered inside the iframe (`getAuthIframe()`)
+2. **Custom button** - App calls `client.connect()` from its own button
+
+### Storage Access API
+
+The iframe needs access to shared localStorage to read accounts, identities, and postage stamps. Browsers may partition iframe storage, requiring the [Storage Access API](https://developer.mozilla.org/en-US/docs/Web/API/Storage_Access_API) to access unpartitioned storage. This API **requires a user gesture inside the iframe**.
+
+### Environment Compatibility
+
+| Environment                           | Iframe button | Custom button       | Notes                                        |
+| ------------------------------------- | ------------- | ------------------- | -------------------------------------------- |
+| **Production (all browsers)**         | Yes           | Yes                 | Secure context, storage not partitioned      |
+| **Localhost (Chrome, Firefox, etc.)** | Yes           | After iframe button | Iframe button requests Storage Access first  |
+| **Localhost (Safari)**                | No            | No                  | Storage Access API doesn't work on localhost |
+| **Safari private mode**               | No            | No                  | Strict storage partitioning                  |
+
+### How It Works
+
+**Production**: In a secure context (HTTPS), browsers don't partition iframe storage, so both authentication methods work immediately (all browsers including Safari).
+
+**Localhost (Chrome/Firefox)**: Browsers partition iframe storage, requiring the [Storage Access API](https://developer.mozilla.org/en-US/docs/Web/API/Storage_Access_API). The iframe button triggers a user gesture inside the iframe, allowing it to request Storage Access. Once granted, the custom button also works.
+
+**Localhost (Safari)**: The Storage Access API doesn't work on localhost, so authentication is not possible. Use Chrome or Firefox for local development.
+
+**Safari private mode**: Private browsing mode enforces strict storage partitioning, so authentication is not possible.
+
+### Recommendation
+
+- **Production**: Either button works (all browsers)
+- **Development**: Use Chrome/Firefox with iframe button first, then custom button works
 
 ## Development
 

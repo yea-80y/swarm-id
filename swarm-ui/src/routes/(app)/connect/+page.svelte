@@ -22,15 +22,11 @@
 	import { sessionStore } from '$lib/stores/session.svelte'
 	import { getMasterKeyFromAccount } from '$lib/utils/account-auth'
 	import Confirmation from '$lib/components/confirmation.svelte'
-	import { postageStampsStore } from '$lib/stores/postage-stamps.svelte'
-	import { networkSettingsStore } from '$lib/stores/network-settings.svelte'
-	import type { PostageStamp, SetSecretMessage } from '@swarm-id/lib'
 
 	let selectedIdentity = $state<Identity | undefined>(undefined)
 	let error = $state<string | undefined>(undefined)
 	let authenticated = $state(false)
 	let selectedAccountId = $state<EthAddress | undefined>(undefined)
-	let proxyMode = $state(false)
 	const selectedAccount = $derived(
 		selectedAccountId ? accountsStore.getAccount(selectedAccountId) : undefined,
 	)
@@ -52,32 +48,8 @@
 	}
 
 	onMount(() => {
-		// Get parameters from URL hash (e.g., #origin=foo&appName=bar&proxyMode=true)
+		// Get parameters from URL hash (e.g., #origin=foo&appName=bar)
 		const hashParams = getHashParams()
-
-		// Check if we're in proxy mode (opened from the proxy iframe)
-		proxyMode = hashParams.get('proxyMode') === 'true'
-
-		if (proxyMode) {
-			// PROXY MODE: Require same-origin opener for postMessage communication
-			if (!window.opener) {
-				error = 'No opener window found. This page must be opened by Swarm ID iframe.'
-				return
-			}
-
-			// Check opener origin - must be same-origin for proxy mode
-			try {
-				const openerOrigin = (window.opener as Window).location.origin
-				if (openerOrigin !== window.location.origin) {
-					error = `Opener origin (${openerOrigin}) does not match expected origin`
-					return
-				}
-			} catch {
-				error = 'Cannot verify opener origin - cross-origin access denied'
-				return
-			}
-		}
-		// DIRECT MODE: No opener validation needed - relies on storage events
 
 		if (!sessionStore.data.appOrigin) {
 			const appOrigin = hashParams.get('origin')
@@ -166,15 +138,6 @@
 		}
 	}
 
-	function getIdentityPostageStamp(identity: Identity): PostageStamp | undefined {
-		const accountId = identity.accountId.toHex()
-		const postageStamp = postageStampsStore.stamps.find((stamp) => stamp.accountId === accountId)
-		if (!postageStamp) {
-			return
-		}
-		return postageStamp
-	}
-
 	function updateSelectedIdentity(appSecret: string) {
 		if (!selectedIdentity) {
 			return
@@ -188,38 +151,8 @@
 			return
 		}
 
-		if (proxyMode) {
-			// PROXY MODE: Send setSecret via postMessage to the opener (the proxy iframe)
-			if (!window.opener || (window.opener as Window).closed) {
-				error = 'Opener window not available'
-				return
-			}
-
-			const postageStamp = getIdentityPostageStamp(selectedIdentity)
-
-			// Always include postageBatchId/signerKey/networkSettings in the message.
-			// The proxy iframe decides whether to use this data or read from shared storage:
-			// - If Storage Access API is granted: reads from shared storage
-			// - If storage is partitioned: uses this message data as fallback
-			const message: SetSecretMessage = {
-				type: 'setSecret',
-				appOrigin: sessionStore.data.appOrigin,
-				data: {
-					secret: appSecret,
-					postageBatchId: postageStamp?.batchID.toHex(),
-					signerKey: postageStamp?.signerKey.toHex(),
-					networkSettings: { ...networkSettingsStore.settings },
-				},
-			}
-
-			;(window.opener as Window).postMessage(message, window.location.origin)
-		}
-		// DIRECT MODE: No postMessage needed - the localStorage write below
-		// triggers a storage event that the proxy detects
-		// Note: This doesn't work in Safari due to storage partitioning - use the iframe button instead
-
-		// Track this app connection with appSecret in shared storage
-		// This happens in BOTH modes - in direct mode, this triggers the storage event
+		// Write to localStorage - this triggers storage events in the iframe
+		// which will detect the new connection and authenticate
 		connectedAppsStore.addOrUpdateApp(
 			{
 				appUrl: sessionStore.data.appOrigin,
