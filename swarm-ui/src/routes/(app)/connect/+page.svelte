@@ -140,6 +140,7 @@
 	}
 
 	async function selectIdentityForConnection(identity: Identity) {
+		error = undefined
 		selectedIdentity = identity
 
 		// Check if there's a valid existing connection
@@ -152,15 +153,16 @@
 				// Reuse the existing connection
 				updateSelectedIdentity(validConnection.appSecret)
 				authenticated = true
+				closeWindowWithSessionCleanup()
 				return
 			}
 		}
 
 		await handleAuthenticate()
 
-		// If this was an existing identity then close the window automatically
+		// If this was an existing identity (not from creation flow), close automatically
 		if (!error && !sessionStore.data.currentIdentityId) {
-			// closeWindowWithSessionCleanup()
+			closeWindowWithSessionCleanup()
 		}
 	}
 
