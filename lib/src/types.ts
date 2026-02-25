@@ -1,4 +1,8 @@
 import { z } from "zod"
+import type {
+  PrivateKey as BeePrivateKey,
+  Topic as BeeTopic,
+} from "@ethersphere/bee-js"
 import { NetworkSettingsSchemaV1 } from "./schemas"
 
 // ============================================================================
@@ -36,6 +40,8 @@ export const AddressSchema = hexString(40) // 20 bytes
 export const PrivateKeySchema = hexString(64) // 32 bytes
 export const IdentifierSchema = hexString(64) // 32 bytes
 export const SignatureSchema = hexString(130) // 65 bytes
+export const TimestampSchema = z.union([z.number(), z.string()])
+export const FeedIndexSchema = z.union([z.number(), z.string()])
 
 export type Reference = z.infer<typeof ReferenceSchema>
 export type BatchId = z.infer<typeof BatchIdSchema>
@@ -43,6 +49,8 @@ export type Address = z.infer<typeof AddressSchema>
 export type PrivateKey = z.infer<typeof PrivateKeySchema>
 export type Identifier = z.infer<typeof IdentifierSchema>
 export type Signature = z.infer<typeof SignatureSchema>
+export type Timestamp = z.infer<typeof TimestampSchema>
+export type FeedIndex = z.infer<typeof FeedIndexSchema>
 
 // ============================================================================
 // Upload/Download Options
@@ -225,6 +233,296 @@ export interface SOCWriter extends SOCReader {
     data: Uint8Array,
     options?: UploadOptions,
   ) => Promise<SocRawUploadResult>
+}
+
+// ============================================================================
+// Feed Types
+// ============================================================================
+
+/**
+ * Options for epoch feed reader creation.
+ */
+export interface FeedReaderOptions {
+  /** Feed topic (32 bytes). */
+  topic: Identifier | Uint8Array | string | BeeTopic
+  /** Optional feed owner address (20 bytes). */
+  owner?: Address | Uint8Array | string
+}
+
+/**
+ * Options for epoch feed writer creation.
+ */
+export interface FeedWriterOptions {
+  /** Feed topic (32 bytes). */
+  topic: Identifier | Uint8Array | string | BeeTopic
+  /** Optional signer private key (32 bytes). */
+  signer?: BeePrivateKey | Uint8Array | string
+}
+
+/**
+ * Epoch feed reader interface.
+ */
+export interface EpochFeedDownloadOptions {
+  /** Unix timestamp (seconds). */
+  at?: bigint | number | string
+  /** Hint of latest known update timestamp. */
+  after?: bigint | number | string
+  /** Optional encryption key for encrypted feed updates. */
+  encryptionKey?: Uint8Array | string
+}
+
+export interface EpochFeedUploadOptions {
+  /** Unix timestamp (seconds). */
+  at?: bigint | number | string
+  /** Optional upload options for the payload upload. */
+  uploadOptions?: UploadOptions
+  /** Whether to encrypt payload uploads (defaults to true). */
+  encrypt?: boolean
+  /** Optional encryption key for encrypted feed updates. */
+  encryptionKey?: Uint8Array | string
+  /** Optional hints from previous update for stateless epoch calculation. */
+  hints?: {
+    lastEpoch?: { start: string; level: number }
+    lastTimestamp?: string
+  }
+}
+
+export interface EpochFeedDownloadPayloadResult {
+  /** Downloaded payload, if available. */
+  payload?: Uint8Array
+  /** Reference used to download the payload, if available. */
+  reference?: Reference
+  /** Encryption key (hex) if the reference is encrypted. */
+  encryptionKey?: string
+}
+
+export interface EpochFeedDownloadReferenceResult {
+  /** Swarm reference (hex), if found. */
+  reference?: Reference
+  /** Encryption key (hex) if the reference is encrypted. */
+  encryptionKey?: string
+}
+
+export interface EpochFeedUploadResult {
+  /** SOC address for the feed update. */
+  socAddress: Reference
+  /** Reference stored in the feed update. */
+  reference: Reference
+  /** Encryption key (hex) if the reference is encrypted. */
+  encryptionKey?: string
+  /** Epoch used for this update (for caller to store as hint) */
+  epoch: { start: string; level: number }
+  /** Timestamp used (stringified bigint) */
+  timestamp: string
+}
+
+/**
+ * Epoch feed reader interface.
+ */
+export interface FeedReader {
+  /** Resolve feed owner address (20 bytes). */
+  getOwner: () => Promise<Address>
+  /** Download the reference for the given timestamp. */
+  downloadReference: (
+    options?: EpochFeedDownloadOptions,
+  ) => Promise<EpochFeedDownloadReferenceResult>
+  /** Download the payload for the given timestamp. */
+  downloadPayload: (
+    options?: EpochFeedDownloadOptions,
+  ) => Promise<EpochFeedDownloadPayloadResult>
+  /** Download unencrypted reference (for /bzz access). */
+  downloadRawReference: (
+    options?: Omit<EpochFeedDownloadOptions, "encryptionKey">,
+  ) => Promise<EpochFeedDownloadReferenceResult>
+  /** Download unencrypted payload (for /bzz access). */
+  downloadRawPayload: (
+    options?: Omit<EpochFeedDownloadOptions, "encryptionKey">,
+  ) => Promise<EpochFeedDownloadPayloadResult>
+}
+
+/**
+ * Epoch feed writer interface.
+ */
+export interface FeedWriter extends FeedReader {
+  /** Upload payload data and update the feed. */
+  uploadPayload: (
+    data: Uint8Array | string,
+    options?: EpochFeedUploadOptions,
+  ) => Promise<EpochFeedUploadResult>
+  /** Update the feed with a reference. */
+  uploadReference: (
+    reference: Uint8Array | string,
+    options?: EpochFeedUploadOptions,
+  ) => Promise<EpochFeedUploadResult>
+  /** Upload unencrypted payload (for /bzz access). */
+  uploadRawPayload: (
+    data: Uint8Array | string,
+    options?: Omit<EpochFeedUploadOptions, "encryptionKey" | "encrypt">,
+  ) => Promise<EpochFeedUploadResult>
+  /** Upload unencrypted reference (for /bzz access). */
+  uploadRawReference: (
+    reference: Uint8Array | string,
+    options?: Omit<EpochFeedUploadOptions, "encryptionKey">,
+  ) => Promise<EpochFeedUploadResult>
+}
+
+// ============================================================================
+// Sequential Feed Types
+// ============================================================================
+
+/**
+ * Options for sequential feed reader creation.
+ */
+export interface SequentialFeedReaderOptions {
+  /** Feed topic (32 bytes). */
+  topic: Identifier | Uint8Array | string | BeeTopic
+  /** Optional feed owner address (20 bytes). */
+  owner?: Address | Uint8Array | string
+}
+
+/**
+ * Options for sequential feed writer creation.
+ */
+export interface SequentialFeedWriterOptions {
+  /** Feed topic (32 bytes). */
+  topic: Identifier | Uint8Array | string | BeeTopic
+  /** Optional signer private key (32 bytes). */
+  signer?: BeePrivateKey | Uint8Array | string
+}
+
+/**
+ * Options for sequential feed lookups/updates.
+ */
+export interface SequentialFeedUpdateOptions {
+  /** Specific feed index to read/write. */
+  index?: FeedIndex | bigint
+  /** Timestamp (seconds) used for lookup or payload timestamp. */
+  at?: Timestamp | bigint
+  /** Whether payload is prefixed with timestamp (default true). */
+  hasTimestamp?: boolean
+  /** Timeout (ms) for sequential index lookups (default 2000). */
+  lookupTimeoutMs?: number
+}
+
+/**
+ * Options for sequential feed uploads.
+ */
+export interface SequentialFeedUploadOptions
+  extends UploadOptions, SequentialFeedUpdateOptions {}
+
+/**
+ * Options for sequential feed raw download (encryptionKey in options).
+ */
+export interface SequentialFeedDownloadRawOptions extends SequentialFeedUpdateOptions {
+  /** Optional encryption key for decrypting encrypted feed updates. */
+  encryptionKey?: Uint8Array | string
+}
+
+/**
+ * Options for sequential feed raw upload (encryptionKey in options).
+ */
+export interface SequentialFeedUploadRawOptions extends SequentialFeedUploadOptions {
+  /** Optional encryption key for encrypting the payload. */
+  encryptionKey?: Uint8Array | string
+}
+
+/**
+ * Result from sequential payload download.
+ */
+export interface SequentialFeedPayloadResult {
+  /** Payload bytes (timestamp removed if present). */
+  payload: Uint8Array
+  /** Timestamp extracted from payload, if present. */
+  timestamp?: number
+  /** Current feed index as a stringified uint64. */
+  feedIndex: string
+  /** Next feed index as a stringified uint64. */
+  feedIndexNext: string
+}
+
+/**
+ * Result from sequential reference download.
+ */
+export interface SequentialFeedReferenceResult {
+  /** Swarm reference stored in the feed update. */
+  reference: string
+  /** Current feed index as a stringified uint64. */
+  feedIndex: string
+  /** Next feed index as a stringified uint64. */
+  feedIndexNext: string
+}
+
+/**
+ * Result from sequential feed upload.
+ */
+export interface SequentialFeedUploadResult {
+  /** SOC address of the feed update. */
+  reference: string
+  /** Feed index used for the update (stringified uint64). */
+  feedIndex: string
+  /** Owner address for the feed update. */
+  owner: string
+  /** Encryption key for decrypting payload (if encrypted). */
+  encryptionKey?: string
+  /** Upload tag UID, if provided. */
+  tagUid?: number
+}
+
+/**
+ * Sequential feed reader interface.
+ */
+export interface SequentialFeedReader {
+  /** Resolve feed owner address (20 bytes). */
+  getOwner: () => Promise<Address>
+  /**
+   * Download and decrypt payload (requires encryption key).
+   * @param encryptionKey - 32-byte encryption key.
+   */
+  downloadPayload: (
+    encryptionKey: Uint8Array | string,
+    options?: SequentialFeedUpdateOptions,
+  ) => Promise<SequentialFeedPayloadResult>
+  /**
+   * Download raw payload or decrypt if encryptionKey is provided in options.
+   */
+  downloadRawPayload: (
+    options?: SequentialFeedDownloadRawOptions,
+  ) => Promise<SequentialFeedPayloadResult>
+  /**
+   * Download and decrypt reference (requires encryption key).
+   * @param encryptionKey - 32-byte encryption key.
+   */
+  downloadReference: (
+    encryptionKey: Uint8Array | string,
+    options?: SequentialFeedUpdateOptions,
+  ) => Promise<SequentialFeedReferenceResult>
+}
+
+/**
+ * Sequential feed writer interface.
+ */
+export interface SequentialFeedWriter extends SequentialFeedReader {
+  /**
+   * Upload encrypted payload.
+   */
+  uploadPayload: (
+    data: Uint8Array | string,
+    options?: SequentialFeedUploadOptions,
+  ) => Promise<SequentialFeedUploadResult>
+  /**
+   * Upload raw payload (or encrypted if encryptionKey provided in options).
+   */
+  uploadRawPayload: (
+    data: Uint8Array | string,
+    options?: SequentialFeedUploadRawOptions,
+  ) => Promise<SequentialFeedUploadResult>
+  /**
+   * Upload a reference payload (encrypted by default).
+   */
+  uploadReference: (
+    reference: Uint8Array | string,
+    options?: SequentialFeedUploadOptions,
+  ) => Promise<SequentialFeedUploadResult>
 }
 
 // ============================================================================
@@ -485,6 +783,145 @@ export const SocGetOwnerMessageSchema = z.object({
   requestId: z.string(),
 })
 
+export const EpochFeedDownloadReferenceMessageSchema = z.object({
+  type: z.literal("epochFeedDownloadReference"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  owner: AddressSchema.optional(),
+  at: TimestampSchema,
+  after: TimestampSchema.optional(),
+  encryptionKey: PrivateKeySchema.optional(),
+  requestOptions: RequestOptionsSchema,
+})
+
+// Schema for epoch hints (used for stateless epoch calculation)
+export const EpochHintsSchema = z
+  .object({
+    lastEpoch: z
+      .object({
+        start: z.string(), // Stringified bigint
+        level: z.number(),
+      })
+      .optional(),
+    lastTimestamp: z.string().optional(), // Stringified bigint
+  })
+  .optional()
+
+export const EpochFeedUploadReferenceMessageSchema = z.object({
+  type: z.literal("epochFeedUploadReference"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  signer: PrivateKeySchema.optional(),
+  at: TimestampSchema,
+  reference: ReferenceSchema,
+  encryptionKey: PrivateKeySchema.optional(),
+  hints: EpochHintsSchema,
+  requestOptions: RequestOptionsSchema,
+})
+
+export const FeedGetOwnerMessageSchema = z.object({
+  type: z.literal("feedGetOwner"),
+  requestId: z.string(),
+})
+
+export const SequentialFeedGetOwnerMessageSchema = z.object({
+  type: z.literal("seqFeedGetOwner"),
+  requestId: z.string(),
+})
+
+export const SequentialFeedDownloadPayloadMessageSchema = z.object({
+  type: z.literal("seqFeedDownloadPayload"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  owner: AddressSchema.optional(),
+  index: FeedIndexSchema.optional(),
+  at: TimestampSchema.optional(),
+  hasTimestamp: z.boolean().optional(),
+  lookupTimeoutMs: z.number().optional(),
+  encryptionKey: PrivateKeySchema,
+  requestOptions: RequestOptionsSchema,
+})
+
+export const SequentialFeedDownloadRawPayloadMessageSchema = z.object({
+  type: z.literal("seqFeedDownloadRawPayload"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  owner: AddressSchema.optional(),
+  index: FeedIndexSchema.optional(),
+  at: TimestampSchema.optional(),
+  hasTimestamp: z.boolean().optional(),
+  lookupTimeoutMs: z.number().optional(),
+  encryptionKey: PrivateKeySchema.optional(),
+  requestOptions: RequestOptionsSchema,
+})
+
+export const SequentialFeedDownloadReferenceMessageSchema = z.object({
+  type: z.literal("seqFeedDownloadReference"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  owner: AddressSchema.optional(),
+  index: FeedIndexSchema.optional(),
+  at: TimestampSchema.optional(),
+  hasTimestamp: z.boolean().optional(),
+  lookupTimeoutMs: z.number().optional(),
+  encryptionKey: PrivateKeySchema,
+  requestOptions: RequestOptionsSchema,
+})
+
+export const SequentialFeedUploadPayloadMessageSchema = z.object({
+  type: z.literal("seqFeedUploadPayload"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  signer: PrivateKeySchema.optional(),
+  data: z.instanceof(Uint8Array),
+  index: FeedIndexSchema.optional(),
+  at: TimestampSchema.optional(),
+  hasTimestamp: z.boolean().optional(),
+  lookupTimeoutMs: z.number().optional(),
+  options: UploadOptionsSchema,
+  requestOptions: RequestOptionsSchema,
+})
+
+export const SequentialFeedUploadRawPayloadMessageSchema = z.object({
+  type: z.literal("seqFeedUploadRawPayload"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  signer: PrivateKeySchema.optional(),
+  data: z.instanceof(Uint8Array),
+  index: FeedIndexSchema.optional(),
+  at: TimestampSchema.optional(),
+  hasTimestamp: z.boolean().optional(),
+  lookupTimeoutMs: z.number().optional(),
+  encryptionKey: PrivateKeySchema.optional(),
+  options: UploadOptionsSchema,
+  requestOptions: RequestOptionsSchema,
+})
+
+export const SequentialFeedUploadReferenceMessageSchema = z.object({
+  type: z.literal("seqFeedUploadReference"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  signer: PrivateKeySchema.optional(),
+  reference: ReferenceSchema,
+  index: FeedIndexSchema.optional(),
+  at: TimestampSchema.optional(),
+  hasTimestamp: z.boolean().optional(),
+  lookupTimeoutMs: z.number().optional(),
+  options: UploadOptionsSchema,
+  requestOptions: RequestOptionsSchema,
+})
+
+// Feed Manifest Message Schema
+export const CreateFeedManifestMessageSchema = z.object({
+  type: z.literal("createFeedManifest"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  owner: AddressSchema.optional(),
+  feedType: z.enum(["Sequence", "Epoch"]).optional(),
+  uploadOptions: UploadOptionsSchema,
+  requestOptions: RequestOptionsSchema,
+})
+
 // ACT (Access Control Tries) Message Schemas
 export const ActUploadDataMessageSchema = z.object({
   type: z.literal("actUploadData"),
@@ -556,6 +993,17 @@ export const ParentToIframeMessageSchema = z.discriminatedUnion("type", [
   SocDownloadMessageSchema,
   SocRawDownloadMessageSchema,
   SocGetOwnerMessageSchema,
+  EpochFeedDownloadReferenceMessageSchema,
+  EpochFeedUploadReferenceMessageSchema,
+  FeedGetOwnerMessageSchema,
+  SequentialFeedGetOwnerMessageSchema,
+  SequentialFeedDownloadPayloadMessageSchema,
+  SequentialFeedDownloadRawPayloadMessageSchema,
+  SequentialFeedDownloadReferenceMessageSchema,
+  SequentialFeedUploadPayloadMessageSchema,
+  SequentialFeedUploadRawPayloadMessageSchema,
+  SequentialFeedUploadReferenceMessageSchema,
+  CreateFeedManifestMessageSchema,
   ActUploadDataMessageSchema,
   ActDownloadDataMessageSchema,
   ActAddGranteesMessageSchema,
@@ -586,6 +1034,37 @@ export type SocRawUploadMessage = z.infer<typeof SocRawUploadMessageSchema>
 export type SocDownloadMessage = z.infer<typeof SocDownloadMessageSchema>
 export type SocRawDownloadMessage = z.infer<typeof SocRawDownloadMessageSchema>
 export type SocGetOwnerMessage = z.infer<typeof SocGetOwnerMessageSchema>
+export type EpochFeedDownloadReferenceMessage = z.infer<
+  typeof EpochFeedDownloadReferenceMessageSchema
+>
+export type EpochFeedUploadReferenceMessage = z.infer<
+  typeof EpochFeedUploadReferenceMessageSchema
+>
+export type FeedGetOwnerMessage = z.infer<typeof FeedGetOwnerMessageSchema>
+export type SequentialFeedGetOwnerMessage = z.infer<
+  typeof SequentialFeedGetOwnerMessageSchema
+>
+export type SequentialFeedDownloadPayloadMessage = z.infer<
+  typeof SequentialFeedDownloadPayloadMessageSchema
+>
+export type SequentialFeedDownloadRawPayloadMessage = z.infer<
+  typeof SequentialFeedDownloadRawPayloadMessageSchema
+>
+export type SequentialFeedDownloadReferenceMessage = z.infer<
+  typeof SequentialFeedDownloadReferenceMessageSchema
+>
+export type SequentialFeedUploadPayloadMessage = z.infer<
+  typeof SequentialFeedUploadPayloadMessageSchema
+>
+export type SequentialFeedUploadRawPayloadMessage = z.infer<
+  typeof SequentialFeedUploadRawPayloadMessageSchema
+>
+export type SequentialFeedUploadReferenceMessage = z.infer<
+  typeof SequentialFeedUploadReferenceMessageSchema
+>
+export type CreateFeedManifestMessage = z.infer<
+  typeof CreateFeedManifestMessageSchema
+>
 export type ActUploadDataMessage = z.infer<typeof ActUploadDataMessageSchema>
 export type ActDownloadDataMessage = z.infer<
   typeof ActDownloadDataMessageSchema
@@ -779,6 +1258,100 @@ export const SocGetOwnerResponseMessageSchema = z.object({
   owner: AddressSchema,
 })
 
+export const EpochFeedDownloadReferenceResponseMessageSchema = z.object({
+  type: z.literal("epochFeedDownloadReferenceResponse"),
+  requestId: z.string(),
+  reference: ReferenceSchema.optional(),
+})
+
+export const EpochFeedUploadReferenceResponseMessageSchema = z.object({
+  type: z.literal("epochFeedUploadReferenceResponse"),
+  requestId: z.string(),
+  socAddress: ReferenceSchema,
+  encryptionKey: PrivateKeySchema.optional(),
+  // Epoch info for next update (stateless hints)
+  epoch: z.object({
+    start: z.string(), // Stringified bigint
+    level: z.number(),
+  }),
+  timestamp: z.string(), // Stringified bigint
+})
+
+export const FeedGetOwnerResponseMessageSchema = z.object({
+  type: z.literal("feedGetOwnerResponse"),
+  requestId: z.string(),
+  owner: AddressSchema,
+})
+
+export const SequentialFeedGetOwnerResponseMessageSchema = z.object({
+  type: z.literal("seqFeedGetOwnerResponse"),
+  requestId: z.string(),
+  owner: AddressSchema,
+})
+
+export const SequentialFeedDownloadPayloadResponseMessageSchema = z.object({
+  type: z.literal("seqFeedDownloadPayloadResponse"),
+  requestId: z.string(),
+  payload: z.instanceof(Uint8Array),
+  timestamp: z.number().optional(),
+  feedIndex: z.string(),
+  feedIndexNext: z.string(),
+})
+
+export const SequentialFeedDownloadRawPayloadResponseMessageSchema = z.object({
+  type: z.literal("seqFeedDownloadRawPayloadResponse"),
+  requestId: z.string(),
+  payload: z.instanceof(Uint8Array),
+  timestamp: z.number().optional(),
+  feedIndex: z.string(),
+  feedIndexNext: z.string(),
+})
+
+export const SequentialFeedDownloadReferenceResponseMessageSchema = z.object({
+  type: z.literal("seqFeedDownloadReferenceResponse"),
+  requestId: z.string(),
+  reference: ReferenceSchema,
+  feedIndex: z.string(),
+  feedIndexNext: z.string(),
+})
+
+export const SequentialFeedUploadPayloadResponseMessageSchema = z.object({
+  type: z.literal("seqFeedUploadPayloadResponse"),
+  requestId: z.string(),
+  reference: ReferenceSchema,
+  feedIndex: z.string(),
+  owner: AddressSchema,
+  encryptionKey: z.string().optional(),
+  tagUid: z.number().optional(),
+})
+
+export const SequentialFeedUploadRawPayloadResponseMessageSchema = z.object({
+  type: z.literal("seqFeedUploadRawPayloadResponse"),
+  requestId: z.string(),
+  reference: ReferenceSchema,
+  feedIndex: z.string(),
+  owner: AddressSchema,
+  encryptionKey: z.string().optional(),
+  tagUid: z.number().optional(),
+})
+
+export const SequentialFeedUploadReferenceResponseMessageSchema = z.object({
+  type: z.literal("seqFeedUploadReferenceResponse"),
+  requestId: z.string(),
+  reference: ReferenceSchema,
+  feedIndex: z.string(),
+  owner: AddressSchema,
+  encryptionKey: z.string().optional(),
+  tagUid: z.number().optional(),
+})
+
+// Feed Manifest Response Schema
+export const CreateFeedManifestResponseMessageSchema = z.object({
+  type: z.literal("createFeedManifestResponse"),
+  requestId: z.string(),
+  reference: ReferenceSchema,
+})
+
 // ACT Response Message Schemas
 export const ActUploadDataResponseMessageSchema = z.object({
   type: z.literal("actUploadDataResponse"),
@@ -852,6 +1425,17 @@ export const IframeToParentMessageSchema = z.discriminatedUnion("type", [
   SocDownloadResponseMessageSchema,
   SocRawDownloadResponseMessageSchema,
   SocGetOwnerResponseMessageSchema,
+  EpochFeedDownloadReferenceResponseMessageSchema,
+  EpochFeedUploadReferenceResponseMessageSchema,
+  FeedGetOwnerResponseMessageSchema,
+  SequentialFeedGetOwnerResponseMessageSchema,
+  SequentialFeedDownloadPayloadResponseMessageSchema,
+  SequentialFeedDownloadRawPayloadResponseMessageSchema,
+  SequentialFeedDownloadReferenceResponseMessageSchema,
+  SequentialFeedUploadPayloadResponseMessageSchema,
+  SequentialFeedUploadRawPayloadResponseMessageSchema,
+  SequentialFeedUploadReferenceResponseMessageSchema,
+  CreateFeedManifestResponseMessageSchema,
   ActUploadDataResponseMessageSchema,
   ActDownloadDataResponseMessageSchema,
   ActAddGranteesResponseMessageSchema,
@@ -921,6 +1505,39 @@ export type SocRawDownloadResponseMessage = z.infer<
 >
 export type SocGetOwnerResponseMessage = z.infer<
   typeof SocGetOwnerResponseMessageSchema
+>
+export type EpochFeedDownloadReferenceResponseMessage = z.infer<
+  typeof EpochFeedDownloadReferenceResponseMessageSchema
+>
+export type EpochFeedUploadReferenceResponseMessage = z.infer<
+  typeof EpochFeedUploadReferenceResponseMessageSchema
+>
+export type FeedGetOwnerResponseMessage = z.infer<
+  typeof FeedGetOwnerResponseMessageSchema
+>
+export type SequentialFeedGetOwnerResponseMessage = z.infer<
+  typeof SequentialFeedGetOwnerResponseMessageSchema
+>
+export type SequentialFeedDownloadPayloadResponseMessage = z.infer<
+  typeof SequentialFeedDownloadPayloadResponseMessageSchema
+>
+export type SequentialFeedDownloadRawPayloadResponseMessage = z.infer<
+  typeof SequentialFeedDownloadRawPayloadResponseMessageSchema
+>
+export type SequentialFeedDownloadReferenceResponseMessage = z.infer<
+  typeof SequentialFeedDownloadReferenceResponseMessageSchema
+>
+export type SequentialFeedUploadPayloadResponseMessage = z.infer<
+  typeof SequentialFeedUploadPayloadResponseMessageSchema
+>
+export type SequentialFeedUploadRawPayloadResponseMessage = z.infer<
+  typeof SequentialFeedUploadRawPayloadResponseMessageSchema
+>
+export type SequentialFeedUploadReferenceResponseMessage = z.infer<
+  typeof SequentialFeedUploadReferenceResponseMessageSchema
+>
+export type CreateFeedManifestResponseMessage = z.infer<
+  typeof CreateFeedManifestResponseMessageSchema
 >
 export type ActUploadDataResponseMessage = z.infer<
   typeof ActUploadDataResponseMessageSchema

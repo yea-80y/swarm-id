@@ -6,10 +6,13 @@
  */
 
 import { Binary } from "cafe-utility"
-import type { Bee } from "@ethersphere/bee-js"
+import type { Bee, BeeRequestOptions } from "@ethersphere/bee-js"
 import { EthAddress, Reference, Topic } from "@ethersphere/bee-js"
 import { EpochIndex, lca, MAX_LEVEL } from "./epoch"
 import type { EpochFinder } from "./types"
+
+const EPOCH_LOOKUP_TIMEOUT_MS = 2000
+const MAX_LEAF_BACKSCAN = 128n
 
 /**
  * Synchronous recursive finder for epoch-based feeds
@@ -36,6 +39,18 @@ export class SyncEpochFinder implements EpochFinder {
     at: bigint,
     after: bigint = 0n,
   ): Promise<Uint8Array | undefined> {
+    // Fast path: exact timestamp updates are written at level-0 and should be
+    // retrievable without traversing potentially poisoned ancestors.
+    const exactEpoch = new EpochIndex(at, 0)
+    try {
+      const exact = await this.getEpochChunk(at, exactEpoch)
+      if (exact) {
+        return exact
+      }
+    } catch {
+      // Ignore and fall back to standard traversal.
+    }
+
     const { epoch, chunk } = await this.common(at, after)
 
     if (!chunk && epoch.level === MAX_LEVEL) {
@@ -43,7 +58,26 @@ export class SyncEpochFinder implements EpochFinder {
       return undefined
     }
 
-    return this.atEpoch(at, epoch, chunk)
+    const traversed = await this.atEpoch(at, epoch, chunk)
+    if (traversed) {
+      return traversed
+    }
+
+    // Recovery fallback for poisoned-ancestor histories: only enable bounded
+    // leaf back-scan when root epoch exists but is invalid for `at`.
+    try {
+      const rootProbe = await this.getEpochChunk(
+        at,
+        new EpochIndex(0n, MAX_LEVEL),
+      )
+      if (rootProbe === undefined) {
+        return this.findPreviousLeaf(at, after)
+      }
+    } catch {
+      // Root missing - no evidence of poisoned ancestors.
+    }
+
+    return undefined
   }
 
   /**
@@ -121,6 +155,12 @@ export class SyncEpochFinder implements EpochFinder {
     // Chunk validation (timestamp) is handled by getEpochChunk
     if (!chunk) {
       // Timestamp invalid (update too recent)
+      if (epoch.level > 0) {
+        const down = await this.atEpoch(at, epoch.childAt(at), currentChunk)
+        if (down) {
+          return down
+        }
+      }
       if (epoch.isLeft()) {
         return currentChunk
       }
@@ -154,6 +194,9 @@ export class SyncEpochFinder implements EpochFinder {
     at: bigint,
     epoch: EpochIndex,
   ): Promise<Uint8Array | undefined> {
+    const requestOptions: BeeRequestOptions = {
+      timeout: EPOCH_LOOKUP_TIMEOUT_MS,
+    }
     // Calculate epoch identifier: Keccak256(topic || Keccak256(start || level))
     const epochHash = await epoch.marshalBinary()
     const identifier = Binary.keccak256(
@@ -168,7 +211,11 @@ export class SyncEpochFinder implements EpochFinder {
     )
 
     // Download chunk
-    const chunkData = await this.bee.downloadChunk(address.toHex())
+    const chunkData = await this.bee.downloadChunk(
+      address.toHex(),
+      undefined,
+      requestOptions,
+    )
 
     // Extract payload from SOC (Single Owner Chunk)
     // SOC structure: [identifier (32 bytes)][signature (65 bytes)][span (8 bytes)][payload]
@@ -188,8 +235,18 @@ export class SyncEpochFinder implements EpochFinder {
     const payloadStart = spanStart + SPAN_SIZE
     const payload = chunkData.slice(payloadStart, payloadStart + payloadLength)
 
-    // Read timestamp from payload (first 8 bytes, big-endian)
-    const timestampBytes = payload.slice(0, TIMESTAMP_SIZE)
+    // Detect payload format based on length:
+    // - 40 bytes: timestamp(8) + reference(32) - from /soc endpoint
+    // - 48 bytes: span(8) + timestamp(8) + reference(32) - from /chunks with v1 format
+    // - 72 bytes: timestamp(8) + encrypted_reference(64) - from /soc endpoint
+    // - 80 bytes: span(8) + timestamp(8) + encrypted_reference(64) - from /chunks with v1 format
+    const hasSpanPrefix = payload.length === 48 || payload.length === 80
+
+    const timestampOffset = hasSpanPrefix ? 8 : 0
+    const timestampBytes = payload.slice(
+      timestampOffset,
+      timestampOffset + TIMESTAMP_SIZE,
+    )
     const timestampView = new DataView(
       timestampBytes.buffer,
       timestampBytes.byteOffset,
@@ -202,7 +259,41 @@ export class SyncEpochFinder implements EpochFinder {
       return undefined
     }
 
-    // Return reference only (skip 8-byte timestamp prefix)
-    return payload.slice(TIMESTAMP_SIZE)
+    // Return reference only (skip timestamp and optional span prefix)
+    return payload.slice(timestampOffset + TIMESTAMP_SIZE)
+  }
+
+  private async findPreviousLeaf(
+    at: bigint,
+    after: bigint,
+  ): Promise<Uint8Array | undefined> {
+    if (at === 0n) {
+      return undefined
+    }
+
+    const minAt = after > 0n ? after : 0n
+    const lowerBound =
+      at > MAX_LEAF_BACKSCAN && at - MAX_LEAF_BACKSCAN > minAt
+        ? at - MAX_LEAF_BACKSCAN
+        : minAt
+
+    let probe = at - 1n
+    while (probe >= lowerBound) {
+      try {
+        const leaf = await this.getEpochChunk(at, new EpochIndex(probe, 0))
+        if (leaf) {
+          return leaf
+        }
+      } catch {
+        // Missing leaf at probe timestamp.
+      }
+
+      if (probe === 0n) {
+        break
+      }
+      probe--
+    }
+
+    return undefined
   }
 }

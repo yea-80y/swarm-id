@@ -17,6 +17,48 @@ import type {
   SocRawUploadMessage,
   SocGetOwnerMessage,
   SocGetOwnerResponseMessage,
+  FeedReaderOptions,
+  FeedWriterOptions,
+  FeedReader,
+  FeedWriter,
+  EpochFeedDownloadReferenceMessage,
+  EpochFeedDownloadReferenceResponseMessage,
+  EpochFeedUploadReferenceMessage,
+  EpochFeedUploadReferenceResponseMessage,
+  FeedGetOwnerMessage,
+  FeedGetOwnerResponseMessage,
+  EpochFeedDownloadOptions,
+  EpochFeedDownloadPayloadResult,
+  EpochFeedDownloadReferenceResult,
+  EpochFeedUploadOptions,
+  EpochFeedUploadResult,
+  SequentialFeedReaderOptions,
+  SequentialFeedWriterOptions,
+  SequentialFeedUpdateOptions,
+  SequentialFeedUploadOptions,
+  SequentialFeedDownloadRawOptions,
+  SequentialFeedUploadRawOptions,
+  SequentialFeedPayloadResult,
+  SequentialFeedReferenceResult,
+  SequentialFeedUploadResult,
+  SequentialFeedReader,
+  SequentialFeedWriter,
+  SequentialFeedGetOwnerMessage,
+  SequentialFeedGetOwnerResponseMessage,
+  SequentialFeedDownloadPayloadMessage,
+  SequentialFeedDownloadPayloadResponseMessage,
+  SequentialFeedDownloadRawPayloadMessage,
+  SequentialFeedDownloadRawPayloadResponseMessage,
+  SequentialFeedDownloadReferenceMessage,
+  SequentialFeedDownloadReferenceResponseMessage,
+  SequentialFeedUploadPayloadMessage,
+  SequentialFeedUploadPayloadResponseMessage,
+  SequentialFeedUploadRawPayloadMessage,
+  SequentialFeedUploadRawPayloadResponseMessage,
+  SequentialFeedUploadReferenceMessage,
+  SequentialFeedUploadReferenceResponseMessage,
+  CreateFeedManifestMessage,
+  CreateFeedManifestResponseMessage,
   SocDownloadMessage,
   SocDownloadResponseMessage,
   SocRawDownloadMessage,
@@ -36,7 +78,7 @@ import {
   AppMetadataSchema,
 } from "./types"
 import { buildAuthUrl } from "./utils/url"
-import { EthAddress, Identifier, PrivateKey } from "@ethersphere/bee-js"
+import { EthAddress, Identifier, PrivateKey, Topic } from "@ethersphere/bee-js"
 import { uint8ArrayToHex } from "./utils/key-derivation"
 
 const DEFAULT_TIMEOUT_MS = 30000
@@ -504,6 +546,55 @@ export class SwarmIdClient {
       return uint8ArrayToHex(key)
     }
     return key
+  }
+
+  private normalizeFeedTopic(
+    topic: Topic | Identifier | Uint8Array | string,
+  ): string {
+    if (topic instanceof Topic) {
+      return uint8ArrayToHex(topic.toUint8Array())
+    }
+    if (topic instanceof Identifier) {
+      return topic.toHex()
+    }
+    if (topic instanceof Uint8Array) {
+      return uint8ArrayToHex(topic)
+    }
+    return topic
+  }
+
+  private normalizeReference(reference: Uint8Array | string): string {
+    if (reference instanceof Uint8Array) {
+      return uint8ArrayToHex(reference)
+    }
+    return reference
+  }
+
+  private normalizeFeedTimestamp(value: bigint | number | string): string {
+    if (typeof value === "bigint") {
+      return value.toString()
+    }
+    if (typeof value === "number") {
+      return BigInt(Math.floor(value)).toString()
+    }
+    return value
+  }
+
+  private normalizeFeedIndex(value: bigint | number | string): string {
+    if (typeof value === "bigint") {
+      return value.toString()
+    }
+    if (typeof value === "number") {
+      return BigInt(Math.floor(value)).toString()
+    }
+    return value
+  }
+
+  private normalizePayload(data: Uint8Array | string): Uint8Array {
+    if (data instanceof Uint8Array) {
+      return data
+    }
+    return new TextEncoder().encode(data)
   }
 
   private socChunkFromResponse(response: {
@@ -1521,6 +1612,992 @@ export class SwarmIdClient {
       rawUpload: (identifier, data, options) =>
         sendRawSocUpload(identifier, data, options),
     }
+  }
+
+  /**
+   * Returns an object for reading epoch-based feeds.
+   *
+   * @param options - Feed reader options
+   * @param options.topic - Feed topic (32 bytes)
+   * @param options.owner - Optional feed owner address
+   * @param requestOptions - Optional request configuration (timeout, headers, endlesslyRetry)
+   * @returns FeedReader with `getOwner`, `downloadReference`, and `downloadPayload`
+   * @throws {Error} If the client is not initialized
+   * @throws {Error} If the request times out
+   */
+  makeEpochFeedReader(
+    options: FeedReaderOptions,
+    requestOptions?: RequestOptions,
+  ): FeedReader {
+    this.ensureReady()
+    const topic = this.normalizeFeedTopic(options.topic)
+    let owner: string | undefined = options.owner
+      ? new EthAddress(options.owner).toHex()
+      : undefined
+
+    const resolveOwner = async (): Promise<string> => {
+      if (owner) {
+        return owner
+      }
+
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        FeedGetOwnerResponseMessage,
+        FeedGetOwnerMessage
+      >({
+        type: "feedGetOwner",
+        requestId,
+      })
+
+      owner = response.owner
+      return owner
+    }
+
+    const downloadReference = async (
+      options?: EpochFeedDownloadOptions,
+    ): Promise<EpochFeedDownloadReferenceResult> => {
+      const atValue =
+        options?.at !== undefined
+          ? options.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedDownloadReferenceResponseMessage,
+        EpochFeedDownloadReferenceMessage
+      >({
+        type: "epochFeedDownloadReference",
+        requestId,
+        topic,
+        owner,
+        at: this.normalizeFeedTimestamp(atValue),
+        after:
+          options?.after !== undefined
+            ? this.normalizeFeedTimestamp(options.after)
+            : undefined,
+        encryptionKey:
+          options?.encryptionKey !== undefined
+            ? this.normalizeSocKey(options.encryptionKey)
+            : undefined,
+        requestOptions,
+      })
+      const reference = response.reference
+      const cleanRef =
+        reference && reference.startsWith("0x") ? reference.slice(2) : reference
+      const encryptionKey =
+        cleanRef && cleanRef.length === 128 ? cleanRef.slice(64) : undefined
+      return { reference, encryptionKey }
+    }
+
+    const downloadPayload = async (
+      options?: EpochFeedDownloadOptions,
+    ): Promise<EpochFeedDownloadPayloadResult> => {
+      const result = await downloadReference(options)
+      if (!result.reference) {
+        return {
+          reference: undefined,
+          payload: undefined,
+          encryptionKey: undefined,
+        }
+      }
+      const payload = await this.downloadData(
+        result.reference,
+        undefined,
+        requestOptions,
+      )
+      return {
+        reference: result.reference,
+        payload,
+        encryptionKey: result.encryptionKey,
+      }
+    }
+
+    const downloadRawReference = async (
+      options?: Omit<EpochFeedDownloadOptions, "encryptionKey">,
+    ): Promise<EpochFeedDownloadReferenceResult> => {
+      const atValue =
+        options?.at !== undefined
+          ? options.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedDownloadReferenceResponseMessage,
+        EpochFeedDownloadReferenceMessage
+      >({
+        type: "epochFeedDownloadReference",
+        requestId,
+        topic,
+        owner,
+        at: this.normalizeFeedTimestamp(atValue),
+        after:
+          options?.after !== undefined
+            ? this.normalizeFeedTimestamp(options.after)
+            : undefined,
+        encryptionKey: undefined, // No encryption for raw download
+        requestOptions,
+      })
+      const reference = response.reference
+      return { reference, encryptionKey: undefined }
+    }
+
+    const downloadRawPayload = async (
+      options?: Omit<EpochFeedDownloadOptions, "encryptionKey">,
+    ): Promise<EpochFeedDownloadPayloadResult> => {
+      const result = await downloadRawReference(options)
+      if (!result.reference) {
+        return {
+          reference: undefined,
+          payload: undefined,
+          encryptionKey: undefined,
+        }
+      }
+      const payload = await this.downloadData(
+        result.reference,
+        undefined,
+        requestOptions,
+      )
+      return {
+        reference: result.reference,
+        payload,
+        encryptionKey: undefined,
+      }
+    }
+
+    return {
+      getOwner: resolveOwner,
+      downloadReference,
+      downloadPayload,
+      downloadRawReference,
+      downloadRawPayload,
+    }
+  }
+
+  /**
+   * Returns an object for reading and writing epoch-based feeds.
+   *
+   * @param options - Feed writer options
+   * @param options.topic - Feed topic (32 bytes)
+   * @param options.signer - Optional feed signer private key. If omitted, the proxy uses the app signer.
+   * @param requestOptions - Optional request configuration (timeout, headers, endlesslyRetry)
+   * @returns FeedWriter with `getOwner`, `downloadReference`, `downloadPayload`, `uploadPayload`, and `uploadReference`
+   * @throws {Error} If the client is not initialized
+   * @throws {Error} If the request times out
+   */
+  makeEpochFeedWriter(
+    options: FeedWriterOptions,
+    requestOptions?: RequestOptions,
+  ): FeedWriter {
+    this.ensureReady()
+    const topic = this.normalizeFeedTopic(options.topic)
+    const signerObj = options.signer
+      ? new PrivateKey(options.signer)
+      : undefined
+    const signerKey = signerObj ? signerObj.toHex() : undefined
+    let owner: string | undefined = signerObj
+      ? signerObj.publicKey().address().toHex()
+      : undefined
+
+    const resolveOwner = async (): Promise<string> => {
+      if (owner) {
+        return owner
+      }
+
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        FeedGetOwnerResponseMessage,
+        FeedGetOwnerMessage
+      >({
+        type: "feedGetOwner",
+        requestId,
+      })
+
+      owner = response.owner
+      return owner
+    }
+
+    const downloadReference = async (
+      options?: EpochFeedDownloadOptions,
+    ): Promise<EpochFeedDownloadReferenceResult> => {
+      const atValue =
+        options?.at !== undefined
+          ? options.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedDownloadReferenceResponseMessage,
+        EpochFeedDownloadReferenceMessage
+      >({
+        type: "epochFeedDownloadReference",
+        requestId,
+        topic,
+        owner,
+        at: this.normalizeFeedTimestamp(atValue),
+        after:
+          options?.after !== undefined
+            ? this.normalizeFeedTimestamp(options.after)
+            : undefined,
+        encryptionKey:
+          options?.encryptionKey !== undefined
+            ? this.normalizeSocKey(options.encryptionKey)
+            : undefined,
+        requestOptions,
+      })
+      const reference = response.reference
+      const cleanRef =
+        reference && reference.startsWith("0x") ? reference.slice(2) : reference
+      const encryptionKey =
+        cleanRef && cleanRef.length === 128 ? cleanRef.slice(64) : undefined
+      return { reference, encryptionKey }
+    }
+
+    const downloadPayload = async (
+      options?: EpochFeedDownloadOptions,
+    ): Promise<EpochFeedDownloadPayloadResult> => {
+      const result = await downloadReference(options)
+      if (!result.reference) {
+        return {
+          reference: undefined,
+          payload: undefined,
+          encryptionKey: undefined,
+        }
+      }
+      const payload = await this.downloadData(
+        result.reference,
+        undefined,
+        requestOptions,
+      )
+      return {
+        reference: result.reference,
+        payload,
+        encryptionKey: result.encryptionKey,
+      }
+    }
+
+    const uploadReference = async (
+      reference: Uint8Array | string,
+      options?: EpochFeedUploadOptions,
+    ): Promise<EpochFeedUploadResult> => {
+      const atValue =
+        options?.at !== undefined
+          ? options.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const normalizedRef = this.normalizeReference(reference)
+      const cleanRef = normalizedRef.startsWith("0x")
+        ? normalizedRef.slice(2)
+        : normalizedRef
+      const derivedKey =
+        cleanRef.length === 128 ? cleanRef.slice(64) : undefined
+      const feedKey = options?.encryptionKey ?? derivedKey
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedUploadReferenceResponseMessage,
+        EpochFeedUploadReferenceMessage
+      >({
+        type: "epochFeedUploadReference",
+        requestId,
+        topic,
+        signer: signerKey,
+        at: this.normalizeFeedTimestamp(atValue),
+        reference: normalizedRef,
+        encryptionKey:
+          feedKey !== undefined ? this.normalizeSocKey(feedKey) : undefined,
+        hints: options?.hints,
+        requestOptions,
+      })
+      const socAddress = response.socAddress
+      const encryptionKey = derivedKey
+      return {
+        socAddress,
+        reference: normalizedRef,
+        encryptionKey,
+        epoch: response.epoch,
+        timestamp: response.timestamp,
+      }
+    }
+
+    const uploadPayload = async (
+      data: Uint8Array | string,
+      options?: EpochFeedUploadOptions,
+    ): Promise<EpochFeedUploadResult> => {
+      const atValue =
+        options?.at !== undefined
+          ? options.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const encrypt = options?.encrypt !== false
+      const uploadResult = await this.uploadData(
+        this.normalizePayload(data),
+        { ...options?.uploadOptions, encrypt },
+        requestOptions,
+      )
+      const cleanRef = uploadResult.reference.startsWith("0x")
+        ? uploadResult.reference.slice(2)
+        : uploadResult.reference
+      const derivedKey =
+        cleanRef.length === 128 ? cleanRef.slice(64) : undefined
+      const feedKey = options?.encryptionKey ?? derivedKey
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedUploadReferenceResponseMessage,
+        EpochFeedUploadReferenceMessage
+      >({
+        type: "epochFeedUploadReference",
+        requestId,
+        topic,
+        signer: signerKey,
+        at: this.normalizeFeedTimestamp(atValue),
+        reference: uploadResult.reference,
+        encryptionKey:
+          feedKey !== undefined ? this.normalizeSocKey(feedKey) : undefined,
+        hints: options?.hints,
+        requestOptions,
+      })
+      const socAddress = response.socAddress
+      const encryptionKey = derivedKey
+      return {
+        socAddress,
+        reference: uploadResult.reference,
+        encryptionKey,
+        epoch: response.epoch,
+        timestamp: response.timestamp,
+      }
+    }
+
+    const downloadRawReference = async (
+      options?: Omit<EpochFeedDownloadOptions, "encryptionKey">,
+    ): Promise<EpochFeedDownloadReferenceResult> => {
+      const atValue =
+        options?.at !== undefined
+          ? options.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedDownloadReferenceResponseMessage,
+        EpochFeedDownloadReferenceMessage
+      >({
+        type: "epochFeedDownloadReference",
+        requestId,
+        topic,
+        owner,
+        at: this.normalizeFeedTimestamp(atValue),
+        after:
+          options?.after !== undefined
+            ? this.normalizeFeedTimestamp(options.after)
+            : undefined,
+        encryptionKey: undefined, // No encryption for raw download
+        requestOptions,
+      })
+      const reference = response.reference
+      return { reference, encryptionKey: undefined }
+    }
+
+    const downloadRawPayload = async (
+      options?: Omit<EpochFeedDownloadOptions, "encryptionKey">,
+    ): Promise<EpochFeedDownloadPayloadResult> => {
+      const result = await downloadRawReference(options)
+      if (!result.reference) {
+        return {
+          reference: undefined,
+          payload: undefined,
+          encryptionKey: undefined,
+        }
+      }
+      const payload = await this.downloadData(
+        result.reference,
+        undefined,
+        requestOptions,
+      )
+      return {
+        reference: result.reference,
+        payload,
+        encryptionKey: undefined,
+      }
+    }
+
+    const uploadRawReference = async (
+      reference: Uint8Array | string,
+      options?: Omit<EpochFeedUploadOptions, "encryptionKey">,
+    ): Promise<EpochFeedUploadResult> => {
+      const atValue =
+        options?.at !== undefined
+          ? options.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const normalizedRef = this.normalizeReference(reference)
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedUploadReferenceResponseMessage,
+        EpochFeedUploadReferenceMessage
+      >({
+        type: "epochFeedUploadReference",
+        requestId,
+        topic,
+        signer: signerKey,
+        at: this.normalizeFeedTimestamp(atValue),
+        reference: normalizedRef,
+        encryptionKey: undefined, // No encryption for raw upload
+        hints: options?.hints,
+        requestOptions,
+      })
+      const socAddress = response.socAddress
+      return {
+        socAddress,
+        reference: normalizedRef,
+        encryptionKey: undefined,
+        epoch: response.epoch,
+        timestamp: response.timestamp,
+      }
+    }
+
+    const uploadRawPayload = async (
+      data: Uint8Array | string,
+      options?: Omit<EpochFeedUploadOptions, "encryptionKey" | "encrypt">,
+    ): Promise<EpochFeedUploadResult> => {
+      const atValue =
+        options?.at !== undefined
+          ? options.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      // Upload with encrypt: false for raw payload
+      const uploadResult = await this.uploadData(
+        this.normalizePayload(data),
+        { ...options?.uploadOptions, encrypt: false },
+        requestOptions,
+      )
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedUploadReferenceResponseMessage,
+        EpochFeedUploadReferenceMessage
+      >({
+        type: "epochFeedUploadReference",
+        requestId,
+        topic,
+        signer: signerKey,
+        at: this.normalizeFeedTimestamp(atValue),
+        reference: uploadResult.reference,
+        encryptionKey: undefined, // No encryption for raw upload
+        hints: options?.hints,
+        requestOptions,
+      })
+      const socAddress = response.socAddress
+      return {
+        socAddress,
+        reference: uploadResult.reference,
+        encryptionKey: undefined,
+        epoch: response.epoch,
+        timestamp: response.timestamp,
+      }
+    }
+
+    return {
+      getOwner: resolveOwner,
+      downloadReference,
+      downloadPayload,
+      downloadRawReference,
+      downloadRawPayload,
+      uploadReference,
+      uploadPayload,
+      uploadRawReference,
+      uploadRawPayload,
+    }
+  }
+
+  /**
+   * Returns a sequential feed reader (chunk API only).
+   *
+   * @param options - Sequential feed reader options
+   * @param options.topic - Feed topic (32 bytes)
+   * @param options.owner - Optional feed owner address
+   * @param requestOptions - Optional request configuration (timeout, headers, endlesslyRetry)
+   * @returns SequentialFeedReader with payload/reference download helpers
+   */
+  makeSequentialFeedReader(
+    options: SequentialFeedReaderOptions,
+    requestOptions?: RequestOptions,
+  ): SequentialFeedReader {
+    this.ensureReady()
+    const topic = this.normalizeFeedTopic(options.topic)
+    let owner: string | undefined = options.owner
+      ? new EthAddress(options.owner).toHex()
+      : undefined
+
+    const resolveOwner = async (): Promise<string> => {
+      if (owner) {
+        return owner
+      }
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedGetOwnerResponseMessage,
+        SequentialFeedGetOwnerMessage
+      >({
+        type: "seqFeedGetOwner",
+        requestId,
+      })
+      owner = response.owner
+      return owner
+    }
+
+    const downloadPayload = async (
+      encryptionKey: Uint8Array | string,
+      options?: SequentialFeedUpdateOptions,
+    ): Promise<SequentialFeedPayloadResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedDownloadPayloadResponseMessage,
+        SequentialFeedDownloadPayloadMessage
+      >({
+        type: "seqFeedDownloadPayload",
+        requestId,
+        topic,
+        owner,
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        lookupTimeoutMs: options?.lookupTimeoutMs,
+        encryptionKey: this.normalizeSocKey(encryptionKey),
+        requestOptions,
+      })
+
+      return {
+        payload: response.payload,
+        timestamp: response.timestamp,
+        feedIndex: response.feedIndex,
+        feedIndexNext: response.feedIndexNext,
+      }
+    }
+
+    const downloadRawPayload = async (
+      options?: SequentialFeedDownloadRawOptions,
+    ): Promise<SequentialFeedPayloadResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedDownloadRawPayloadResponseMessage,
+        SequentialFeedDownloadRawPayloadMessage
+      >({
+        type: "seqFeedDownloadRawPayload",
+        requestId,
+        topic,
+        owner,
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        lookupTimeoutMs: options?.lookupTimeoutMs,
+        encryptionKey: options?.encryptionKey
+          ? this.normalizeSocKey(options.encryptionKey)
+          : undefined,
+        requestOptions,
+      })
+
+      return {
+        payload: response.payload,
+        timestamp: response.timestamp,
+        feedIndex: response.feedIndex,
+        feedIndexNext: response.feedIndexNext,
+      }
+    }
+
+    const downloadReference = async (
+      encryptionKey: Uint8Array | string,
+      options?: SequentialFeedUpdateOptions,
+    ): Promise<SequentialFeedReferenceResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedDownloadReferenceResponseMessage,
+        SequentialFeedDownloadReferenceMessage
+      >({
+        type: "seqFeedDownloadReference",
+        requestId,
+        topic,
+        owner,
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        lookupTimeoutMs: options?.lookupTimeoutMs,
+        encryptionKey: this.normalizeSocKey(encryptionKey),
+        requestOptions,
+      })
+
+      return {
+        reference: response.reference,
+        feedIndex: response.feedIndex,
+        feedIndexNext: response.feedIndexNext,
+      }
+    }
+
+    return {
+      getOwner: resolveOwner,
+      downloadPayload,
+      downloadRawPayload,
+      downloadReference,
+    }
+  }
+
+  /**
+   * Returns a sequential feed writer (chunk API only).
+   *
+   * @param options - Sequential feed writer options
+   * @param options.topic - Feed topic (32 bytes)
+   * @param options.signer - Optional signer private key. If omitted, proxy uses app signer.
+   * @param requestOptions - Optional request configuration (timeout, headers, endlesslyRetry)
+   * @returns SequentialFeedWriter with payload/reference upload helpers
+   */
+  makeSequentialFeedWriter(
+    options: SequentialFeedWriterOptions,
+    requestOptions?: RequestOptions,
+  ): SequentialFeedWriter {
+    this.ensureReady()
+    const topic = this.normalizeFeedTopic(options.topic)
+    const signerObj = options.signer
+      ? new PrivateKey(options.signer)
+      : undefined
+    const signerKey = signerObj ? signerObj.toHex() : undefined
+    let owner: string | undefined = signerObj
+      ? signerObj.publicKey().address().toHex()
+      : undefined
+
+    const resolveOwner = async (): Promise<string> => {
+      if (owner) {
+        return owner
+      }
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedGetOwnerResponseMessage,
+        SequentialFeedGetOwnerMessage
+      >({
+        type: "seqFeedGetOwner",
+        requestId,
+      })
+      owner = response.owner
+      return owner
+    }
+
+    const downloadPayload = async (
+      encryptionKey: Uint8Array | string,
+      options?: SequentialFeedUpdateOptions,
+    ): Promise<SequentialFeedPayloadResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedDownloadPayloadResponseMessage,
+        SequentialFeedDownloadPayloadMessage
+      >({
+        type: "seqFeedDownloadPayload",
+        requestId,
+        topic,
+        owner,
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        encryptionKey: this.normalizeSocKey(encryptionKey),
+        requestOptions,
+      })
+
+      return {
+        payload: response.payload,
+        timestamp: response.timestamp,
+        feedIndex: response.feedIndex,
+        feedIndexNext: response.feedIndexNext,
+      }
+    }
+
+    const downloadRawPayload = async (
+      options?: SequentialFeedDownloadRawOptions,
+    ): Promise<SequentialFeedPayloadResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedDownloadRawPayloadResponseMessage,
+        SequentialFeedDownloadRawPayloadMessage
+      >({
+        type: "seqFeedDownloadRawPayload",
+        requestId,
+        topic,
+        owner,
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        encryptionKey: options?.encryptionKey
+          ? this.normalizeSocKey(options.encryptionKey)
+          : undefined,
+        requestOptions,
+      })
+
+      return {
+        payload: response.payload,
+        timestamp: response.timestamp,
+        feedIndex: response.feedIndex,
+        feedIndexNext: response.feedIndexNext,
+      }
+    }
+
+    const downloadReference = async (
+      encryptionKey: Uint8Array | string,
+      options?: SequentialFeedUpdateOptions,
+    ): Promise<SequentialFeedReferenceResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedDownloadReferenceResponseMessage,
+        SequentialFeedDownloadReferenceMessage
+      >({
+        type: "seqFeedDownloadReference",
+        requestId,
+        topic,
+        owner,
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        encryptionKey: this.normalizeSocKey(encryptionKey),
+        requestOptions,
+      })
+
+      return {
+        reference: response.reference,
+        feedIndex: response.feedIndex,
+        feedIndexNext: response.feedIndexNext,
+      }
+    }
+
+    const uploadPayload = async (
+      data: Uint8Array | string,
+      options?: SequentialFeedUploadOptions,
+    ): Promise<SequentialFeedUploadResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedUploadPayloadResponseMessage,
+        SequentialFeedUploadPayloadMessage
+      >({
+        type: "seqFeedUploadPayload",
+        requestId,
+        topic,
+        signer: signerKey,
+        data: this.normalizePayload(data),
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        lookupTimeoutMs: options?.lookupTimeoutMs,
+        options,
+        requestOptions,
+      })
+
+      owner = response.owner
+
+      return {
+        reference: response.reference,
+        feedIndex: response.feedIndex,
+        owner: response.owner,
+        encryptionKey: response.encryptionKey,
+        tagUid: response.tagUid,
+      }
+    }
+
+    const uploadRawPayload = async (
+      data: Uint8Array | string,
+      options?: SequentialFeedUploadRawOptions,
+    ): Promise<SequentialFeedUploadResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedUploadRawPayloadResponseMessage,
+        SequentialFeedUploadRawPayloadMessage
+      >({
+        type: "seqFeedUploadRawPayload",
+        requestId,
+        topic,
+        signer: signerKey,
+        data: this.normalizePayload(data),
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        lookupTimeoutMs: options?.lookupTimeoutMs,
+        encryptionKey: options?.encryptionKey
+          ? this.normalizeSocKey(options.encryptionKey)
+          : undefined,
+        options,
+        requestOptions,
+      })
+
+      owner = response.owner
+
+      return {
+        reference: response.reference,
+        feedIndex: response.feedIndex,
+        owner: response.owner,
+        encryptionKey: response.encryptionKey,
+        tagUid: response.tagUid,
+      }
+    }
+
+    const uploadReference = async (
+      reference: Uint8Array | string,
+      options?: SequentialFeedUploadOptions,
+    ): Promise<SequentialFeedUploadResult> => {
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        SequentialFeedUploadReferenceResponseMessage,
+        SequentialFeedUploadReferenceMessage
+      >({
+        type: "seqFeedUploadReference",
+        requestId,
+        topic,
+        signer: signerKey,
+        reference: this.normalizeReference(reference),
+        index:
+          options?.index !== undefined
+            ? this.normalizeFeedIndex(options.index as bigint | number | string)
+            : undefined,
+        at:
+          options?.at !== undefined
+            ? this.normalizeFeedTimestamp(
+                options.at as bigint | number | string,
+              )
+            : undefined,
+        hasTimestamp: options?.hasTimestamp,
+        lookupTimeoutMs: options?.lookupTimeoutMs,
+        options,
+        requestOptions,
+      })
+
+      owner = response.owner
+
+      return {
+        reference: response.reference,
+        feedIndex: response.feedIndex,
+        owner: response.owner,
+        encryptionKey: response.encryptionKey,
+        tagUid: response.tagUid,
+      }
+    }
+
+    return {
+      getOwner: resolveOwner,
+      downloadPayload,
+      downloadRawPayload,
+      downloadReference,
+      uploadPayload,
+      uploadRawPayload,
+      uploadReference,
+    }
+  }
+
+  // ============================================================================
+  // Feed Manifest Methods
+  // ============================================================================
+
+  /**
+   * Creates a feed manifest for accessing feed content via URL.
+   *
+   * A feed manifest enables accessing the latest feed content via a URL path
+   * (e.g., `/bzz/{manifest-reference}/`). The manifest stores metadata about
+   * the feed including owner, topic, and type.
+   *
+   * @param topic - Feed topic (32-byte hex string)
+   * @param options - Optional configuration
+   * @param options.owner - Feed owner address; if omitted, uses app signer
+   * @param options.uploadOptions - Upload configuration (pin, deferred, etc.)
+   * @param requestOptions - Request configuration (timeout, headers)
+   * @returns Promise resolving to the manifest reference
+   * @throws {Error} If the client is not initialized
+   * @throws {Error} If no owner is provided and no app signer is available
+   * @throws {Error} If the request times out
+   *
+   * @example
+   * ```typescript
+   * // Create manifest for a feed (uses app signer as owner)
+   * const manifestRef = await client.createFeedManifest(topic)
+   * console.log('Feed accessible at /bzz/' + manifestRef)
+   *
+   * // Create manifest with explicit owner
+   * const manifestRef = await client.createFeedManifest(topic, {
+   *   owner: '0x1234...',
+   *   uploadOptions: { pin: true }
+   * })
+   * ```
+   */
+  async createFeedManifest(
+    topic: string,
+    options?: {
+      owner?: string
+      /** Feed type: "Sequence" for sequential feeds, "Epoch" for epoch feeds. Default: "Sequence" */
+      feedType?: "Sequence" | "Epoch"
+      uploadOptions?: UploadOptions
+    },
+    requestOptions?: RequestOptions,
+  ): Promise<string> {
+    this.ensureReady()
+    const normalizedTopic = this.normalizeFeedTopic(topic)
+    const requestId = this.generateRequestId()
+
+    const response = await this.sendRequest<
+      CreateFeedManifestResponseMessage,
+      CreateFeedManifestMessage
+    >({
+      type: "createFeedManifest",
+      requestId,
+      topic: normalizedTopic,
+      owner: options?.owner,
+      feedType: options?.feedType,
+      uploadOptions: options?.uploadOptions,
+      requestOptions,
+    })
+
+    return response.reference
   }
 
   // ============================================================================

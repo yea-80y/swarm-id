@@ -20,12 +20,23 @@ import type {
   SocDownloadMessage,
   SocRawDownloadMessage,
   SocGetOwnerMessage,
+  EpochFeedDownloadReferenceMessage,
+  EpochFeedUploadReferenceMessage,
+  FeedGetOwnerMessage,
+  SequentialFeedGetOwnerMessage,
+  SequentialFeedDownloadPayloadMessage,
+  SequentialFeedDownloadRawPayloadMessage,
+  SequentialFeedDownloadReferenceMessage,
+  SequentialFeedUploadPayloadMessage,
+  SequentialFeedUploadRawPayloadMessage,
+  SequentialFeedUploadReferenceMessage,
   ActUploadDataMessage,
   ActDownloadDataMessage,
   ActAddGranteesMessage,
   ActRevokeGranteesMessage,
   ActGetGranteesMessage,
   GetPostageBatchMessage,
+  CreateFeedManifestMessage,
   AppMetadata,
   PostageStamp,
   PostageBatch,
@@ -39,14 +50,17 @@ import {
   EthAddress,
   PrivateKey,
   Identifier,
+  Topic,
   MantarayNode,
   NULL_ADDRESS,
 } from "@ethersphere/bee-js"
+import type { BeeRequestOptions } from "@ethersphere/bee-js"
 import { uploadDataWithSigning } from "./proxy/upload-data"
 import {
   uploadEncryptedDataWithSigning,
   uploadEncryptedSOC,
   uploadSOC,
+  uploadSOCViaSocEndpoint,
 } from "./proxy/upload-encrypted-data"
 import {
   downloadDataWithChunkAPI,
@@ -59,6 +73,7 @@ import {
   saveMantarayTreeRecursively,
 } from "./proxy/mantaray"
 import { saveMantarayTreeRecursivelyEncrypted } from "./proxy/mantaray-encrypted"
+import { createFeedManifestDirect } from "./proxy/feed-manifest"
 import { UtilizationAwareStamper } from "./utils/batch-utilization"
 import { UtilizationStoreDB } from "./storage/utilization-store"
 import {
@@ -69,6 +84,12 @@ import {
   createAccountsStorageManager,
 } from "./utils/storage-managers"
 import { hexToUint8Array, uint8ArrayToHex } from "./utils/key-derivation"
+import {
+  createAsyncEpochFinder,
+  createEpochUpdater,
+} from "./proxy/feeds/epochs"
+import { createAsyncSequentialFinder } from "./proxy/feeds/sequence"
+import { Binary } from "cafe-utility"
 import { calculateTTLSeconds, fetchSwarmPrice } from "./utils/ttl"
 import { DEFAULT_BEE_NODE_URL } from "./schemas"
 import { buildAuthUrl } from "./utils/url"
@@ -83,6 +104,7 @@ import {
 
 const DEFAULT_ACT_FILENAME = "index.bin"
 const DEFAULT_ACT_CONTENT_TYPE = "application/octet-stream"
+const SEQUENTIAL_INDEX_LOOKUP_TIMEOUT_MS = 2000
 
 /**
  * Swarm ID Proxy - Runs inside the iframe
@@ -547,6 +569,36 @@ export class SwarmIdProxy {
       case "socGetOwner":
         await this.handleSocGetOwner(message, event)
         break
+      case "epochFeedDownloadReference":
+        await this.handleEpochFeedDownloadReference(message, event)
+        break
+      case "epochFeedUploadReference":
+        await this.handleEpochFeedUploadReference(message, event)
+        break
+      case "feedGetOwner":
+        await this.handleFeedGetOwner(message, event)
+        break
+      case "seqFeedGetOwner":
+        await this.handleSequentialFeedGetOwner(message, event)
+        break
+      case "seqFeedDownloadPayload":
+        await this.handleSequentialFeedDownloadPayload(message, event)
+        break
+      case "seqFeedDownloadRawPayload":
+        await this.handleSequentialFeedDownloadRawPayload(message, event)
+        break
+      case "seqFeedDownloadReference":
+        await this.handleSequentialFeedDownloadReference(message, event)
+        break
+      case "seqFeedUploadPayload":
+        await this.handleSequentialFeedUploadPayload(message, event)
+        break
+      case "seqFeedUploadRawPayload":
+        await this.handleSequentialFeedUploadRawPayload(message, event)
+        break
+      case "seqFeedUploadReference":
+        await this.handleSequentialFeedUploadReference(message, event)
+        break
 
       case "actUploadData":
         await this.handleActUploadData(message, event)
@@ -570,6 +622,10 @@ export class SwarmIdProxy {
 
       case "getPostageBatch":
         await this.handleGetPostageBatch(message, event)
+        break
+
+      case "createFeedManifest":
+        await this.handleCreateFeedManifest(message, event)
         break
 
       default:
@@ -2026,6 +2082,1098 @@ export class SwarmIdProxy {
     }
   }
 
+  private parseFeedTimestamp(value: string | number): bigint {
+    if (typeof value === "number") {
+      return BigInt(Math.floor(value))
+    }
+    // Validate string is a valid integer representation
+    if (!/^-?\d+$/.test(value)) {
+      throw new Error(
+        `Invalid timestamp format: "${value}" (expected decimal integer)`,
+      )
+    }
+    return BigInt(value)
+  }
+
+  private parseFeedIndex(value: string | number): bigint {
+    if (typeof value === "number") {
+      return BigInt(Math.floor(value))
+    }
+    // Validate string is a valid integer representation
+    if (!/^-?\d+$/.test(value)) {
+      throw new Error(
+        `Invalid index format: "${value}" (expected decimal integer)`,
+      )
+    }
+    return BigInt(value)
+  }
+
+  private makeSequentialFeedIdentifier(
+    topic: Uint8Array,
+    index: bigint,
+  ): Uint8Array {
+    const indexBytes = Binary.numberToUint64(index, "BE")
+    return Binary.keccak256(Binary.concatBytes(topic, indexBytes))
+  }
+
+  private async findLatestSequentialIndex(
+    topic: Uint8Array,
+    owner: EthAddress,
+    requestOptions?: BeeRequestOptions,
+    lookupTimeoutMs?: number,
+  ): Promise<bigint | undefined> {
+    const lookupOptions: BeeRequestOptions = {
+      ...requestOptions,
+      timeout: lookupTimeoutMs ?? SEQUENTIAL_INDEX_LOOKUP_TIMEOUT_MS,
+    }
+    const finder = createAsyncSequentialFinder({
+      bee: this.bee,
+      topic: new Topic(topic),
+      owner,
+    })
+    const result = await finder.findAt(0n, 0n, lookupOptions)
+    return result.current
+  }
+
+  private sequentialNextIndex(index: bigint): bigint {
+    const max = (1n << 64n) - 1n
+    return index === max ? 0n : index + 1n
+  }
+
+  private async handleFeedGetOwner(
+    message: FeedGetOwnerMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const { requestId } = message
+
+    console.log("[Proxy] Feed get owner request")
+
+    try {
+      if (!this.appSecret) {
+        throw new Error("Not authenticated. Please login first.")
+      }
+
+      const owner = new PrivateKey(this.appSecret).publicKey().address().toHex()
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "feedGetOwnerResponse",
+            requestId,
+            owner,
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Feed get owner successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error ? error.message : "Feed get owner failed",
+      )
+    }
+  }
+
+  private async handleEpochFeedDownloadReference(
+    message: EpochFeedDownloadReferenceMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const { requestId, topic, owner, at, after, encryptionKey } = message
+
+    console.log("[Proxy] Epoch feed download reference request", {
+      topic,
+      owner: owner ?? "proxy",
+      at,
+      hasEncryptionKey: !!encryptionKey,
+      encryptionKeyPrefix: encryptionKey
+        ? encryptionKey.slice(0, 8)
+        : undefined,
+      encryptionKeyIsAllZero: encryptionKey
+        ? /^0+$/.test(encryptionKey)
+        : undefined,
+    })
+
+    try {
+      let resolvedOwner = owner
+      if (!resolvedOwner) {
+        if (!this.appSecret) {
+          throw new Error("Not authenticated. Please login first.")
+        }
+        resolvedOwner = new PrivateKey(this.appSecret)
+          .publicKey()
+          .address()
+          .toHex()
+      }
+
+      const topicObj = new Topic(hexToUint8Array(topic))
+      const ownerObj = new EthAddress(resolvedOwner)
+      const atValue = this.parseFeedTimestamp(at)
+      const afterValue =
+        after !== undefined ? this.parseFeedTimestamp(after) : 0n
+      const epochKeyBytes = encryptionKey
+        ? hexToUint8Array(encryptionKey)
+        : undefined
+
+      console.log("[Proxy] Epoch debug lookup state", {
+        owner: resolvedOwner,
+        at: atValue.toString(),
+        withKey: undefined,
+        plain: undefined,
+      })
+
+      let reference: Uint8Array | undefined
+      if (epochKeyBytes) {
+        const encryptedFinder = createAsyncEpochFinder({
+          bee: this.bee,
+          topic: topicObj,
+          owner: ownerObj,
+          encryptionKey: epochKeyBytes,
+        })
+        reference = await encryptedFinder.findAt(atValue, afterValue)
+      } else {
+        const plainFinder = createAsyncEpochFinder({
+          bee: this.bee,
+          topic: topicObj,
+          owner: ownerObj,
+        })
+        reference = await plainFinder.findAt(atValue, afterValue)
+      }
+      console.log("[Proxy] Epoch feed download reference result", {
+        found: !!reference,
+        length: reference ? reference.length : 0,
+      })
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "epochFeedDownloadReferenceResponse",
+            requestId,
+            reference: reference ? uint8ArrayToHex(reference) : undefined,
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Epoch feed download reference successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Epoch feed download reference failed",
+      )
+    }
+  }
+
+  private async handleEpochFeedUploadReference(
+    message: EpochFeedUploadReferenceMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const { requestId, topic, signer, at, reference, encryptionKey, hints } =
+      message
+
+    console.log("[Proxy] Epoch feed upload reference request", {
+      topic,
+      signer: signer ? "provided" : "proxy",
+      at,
+      referenceLength: reference.length,
+      hasEncryptionKey: !!encryptionKey,
+      encryptionKeyPrefix: encryptionKey
+        ? encryptionKey.slice(0, 8)
+        : undefined,
+      encryptionKeyIsAllZero: encryptionKey
+        ? /^0+$/.test(encryptionKey)
+        : undefined,
+      hasHints: !!hints?.lastEpoch,
+    })
+
+    try {
+      if (!this.authenticated || !this.appSecret) {
+        throw new Error("Not authenticated. Please login first.")
+      }
+
+      if (!this.postageBatchId || !this.stamper) {
+        throw new Error(
+          "Postage batch ID and stamper required. Please login first.",
+        )
+      }
+
+      const signerKey = signer ?? this.appSecret
+      const signerKeyObj = new PrivateKey(signerKey)
+      const topicObj = new Topic(hexToUint8Array(topic))
+      const ownerHex = signerKeyObj.publicKey().address().toHex()
+      const ownerAddress = new EthAddress(ownerHex)
+      const updater = createEpochUpdater({
+        bee: this.bee,
+        topic: topicObj,
+        owner: ownerAddress,
+        signer: signerKeyObj,
+      })
+      const atValue = this.parseFeedTimestamp(at)
+      const epochEncryptionKey = encryptionKey
+        ? hexToUint8Array(encryptionKey)
+        : undefined
+
+      // Convert hints from message format to updater format
+      const epochHints = hints?.lastEpoch
+        ? {
+            lastEpoch: {
+              start: BigInt(hints.lastEpoch.start),
+              level: hints.lastEpoch.level,
+            },
+            lastTimestamp: hints.lastTimestamp
+              ? BigInt(hints.lastTimestamp)
+              : undefined,
+          }
+        : undefined
+
+      console.log("[Proxy] Epoch upload", {
+        owner: ownerHex,
+        at: atValue.toString(),
+        hasEncryptionKey: !!epochEncryptionKey,
+        hasHints: !!epochHints,
+      })
+
+      const referenceBytes = hexToUint8Array(reference)
+      const updateResult = await updater.update(
+        atValue,
+        referenceBytes,
+        this.stamper,
+        epochEncryptionKey,
+        epochHints,
+      )
+      console.log("[Proxy] Epoch upload complete", {
+        socAddress: uint8ArrayToHex(updateResult.socAddress),
+        epochStart: updateResult.epoch.start.toString(),
+        epochLevel: updateResult.epoch.level,
+      })
+
+      const readBackFinder = createAsyncEpochFinder({
+        bee: this.bee,
+        topic: topicObj,
+        owner: ownerAddress,
+        encryptionKey: epochEncryptionKey,
+      })
+      // Upload read-back should verify the exact timestamp write and avoid
+      // broad fallback scans over historical leaves on poisoned networks.
+      const readBack = await readBackFinder.findAt(atValue, atValue)
+      console.log("[Proxy] Epoch upload read-back", {
+        at: atValue.toString(),
+        found: !!readBack,
+        length: readBack ? readBack.length : 0,
+      })
+
+      await this.saveStamperState()
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "epochFeedUploadReferenceResponse",
+            requestId,
+            socAddress: uint8ArrayToHex(updateResult.socAddress),
+            encryptionKey: encryptionKey ? encryptionKey : undefined,
+            epoch: {
+              start: updateResult.epoch.start.toString(),
+              level: updateResult.epoch.level,
+            },
+            timestamp: updateResult.timestamp.toString(),
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Epoch feed upload reference successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Epoch feed upload reference failed",
+      )
+    }
+  }
+
+  private async handleSequentialFeedGetOwner(
+    message: SequentialFeedGetOwnerMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const { requestId } = message
+
+    console.log("[Proxy] Sequential feed get owner request")
+
+    try {
+      if (!this.appSecret) {
+        throw new Error("Not authenticated. Please login first.")
+      }
+
+      const owner = new PrivateKey(this.appSecret).publicKey().address().toHex()
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "seqFeedGetOwnerResponse",
+            requestId,
+            owner,
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Sequential feed get owner successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Sequential feed get owner failed",
+      )
+    }
+  }
+
+  private async resolveSequentialOwner(owner?: string): Promise<string> {
+    if (owner) {
+      return owner
+    }
+    if (!this.appSecret) {
+      throw new Error("Not authenticated. Please login first.")
+    }
+    return new PrivateKey(this.appSecret).publicKey().address().toHex()
+  }
+
+  private parseSequentialPayload(
+    payload: Uint8Array,
+    hasTimestamp: boolean,
+  ): { payload: Uint8Array; timestamp?: number } {
+    if (!hasTimestamp) {
+      return { payload }
+    }
+
+    if (payload.length < 8) {
+      return { payload, timestamp: undefined }
+    }
+
+    const view = new DataView(
+      payload.buffer,
+      payload.byteOffset,
+      payload.byteLength,
+    )
+    const timestamp = Number(view.getBigUint64(0, false))
+    return { payload: payload.slice(8), timestamp }
+  }
+
+  private async resolveSequentialIndex(
+    topicBytes: Uint8Array,
+    ownerAddress: EthAddress,
+    index?: string | number,
+    at?: string | number,
+    hasTimestamp: boolean = true,
+    requestOptions?: BeeRequestOptions,
+    encryptionKey?: string,
+    raw: boolean = false,
+    lookupTimeoutMs?: number,
+  ): Promise<bigint> {
+    if (!raw && !encryptionKey) {
+      throw new Error("Encryption key is required for encrypted feed lookup")
+    }
+    if (index !== undefined) {
+      return this.parseFeedIndex(index)
+    }
+
+    const latest = await this.findLatestSequentialIndex(
+      topicBytes,
+      ownerAddress,
+      requestOptions,
+      lookupTimeoutMs,
+    )
+    if (latest === undefined) {
+      throw new Error("Sequential feed has no updates")
+    }
+
+    if (at === undefined) {
+      return latest
+    }
+
+    if (!hasTimestamp) {
+      throw new Error("Cannot use 'at' without timestamps")
+    }
+
+    const atValue = this.parseFeedTimestamp(at)
+    for (let current = latest; current >= 0n; current--) {
+      const identifierBytes = this.makeSequentialFeedIdentifier(
+        topicBytes,
+        current,
+      )
+      const identifier = new Identifier(identifierBytes)
+      const soc = raw
+        ? encryptionKey
+          ? await downloadEncryptedSOC(
+              this.bee,
+              ownerAddress,
+              identifier,
+              encryptionKey,
+              requestOptions,
+            )
+          : await downloadSOC(
+              this.bee,
+              ownerAddress,
+              identifier,
+              requestOptions,
+            )
+        : await downloadEncryptedSOC(
+            this.bee,
+            ownerAddress,
+            identifier,
+            encryptionKey ?? "",
+            requestOptions,
+          )
+
+      const parsed = this.parseSequentialPayload(soc.payload, true)
+      if (
+        parsed.timestamp !== undefined &&
+        BigInt(parsed.timestamp) <= atValue
+      ) {
+        return current
+      }
+      if (current === 0n) {
+        break
+      }
+    }
+
+    // If no update matches the timestamp, fall back to latest for sequential feeds.
+    return latest
+  }
+
+  private async handleSequentialFeedDownloadPayload(
+    message: SequentialFeedDownloadPayloadMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const {
+      requestId,
+      topic,
+      owner,
+      index,
+      at,
+      hasTimestamp,
+      encryptionKey,
+      lookupTimeoutMs,
+      requestOptions,
+    } = message
+
+    console.log("[Proxy] Sequential feed download payload request")
+
+    try {
+      if (!encryptionKey) {
+        throw new Error("Encryption key is required for downloadPayload")
+      }
+
+      const resolvedOwner = await this.resolveSequentialOwner(owner)
+      const ownerAddress = new EthAddress(resolvedOwner)
+      const topicBytes = hexToUint8Array(topic)
+      const useTimestamp = hasTimestamp !== false
+      const resolvedIndex = await this.resolveSequentialIndex(
+        topicBytes,
+        ownerAddress,
+        index,
+        at,
+        useTimestamp,
+        requestOptions,
+        encryptionKey,
+        false,
+        lookupTimeoutMs,
+      )
+
+      const identifierBytes = this.makeSequentialFeedIdentifier(
+        topicBytes,
+        resolvedIndex,
+      )
+      const identifier = new Identifier(identifierBytes)
+      const soc = await downloadEncryptedSOC(
+        this.bee,
+        ownerAddress,
+        identifier,
+        encryptionKey,
+        requestOptions,
+      )
+
+      const parsed = this.parseSequentialPayload(soc.payload, useTimestamp)
+      const nextIndex = this.sequentialNextIndex(resolvedIndex)
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "seqFeedDownloadPayloadResponse",
+            requestId,
+            payload: parsed.payload,
+            timestamp: parsed.timestamp,
+            feedIndex: resolvedIndex.toString(),
+            feedIndexNext: nextIndex.toString(),
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Sequential feed download payload successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Sequential feed download payload failed",
+      )
+    }
+  }
+
+  private async handleSequentialFeedDownloadRawPayload(
+    message: SequentialFeedDownloadRawPayloadMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const {
+      requestId,
+      topic,
+      owner,
+      index,
+      at,
+      hasTimestamp,
+      encryptionKey,
+      lookupTimeoutMs,
+      requestOptions,
+    } = message
+
+    console.log("[Proxy] Sequential feed download raw payload request")
+
+    try {
+      const resolvedOwner = await this.resolveSequentialOwner(owner)
+      const ownerAddress = new EthAddress(resolvedOwner)
+      const topicBytes = hexToUint8Array(topic)
+      const useTimestamp = hasTimestamp !== false
+      const resolvedIndex = await this.resolveSequentialIndex(
+        topicBytes,
+        ownerAddress,
+        index,
+        at,
+        useTimestamp,
+        requestOptions,
+        encryptionKey,
+        true,
+        lookupTimeoutMs,
+      )
+
+      const identifierBytes = this.makeSequentialFeedIdentifier(
+        topicBytes,
+        resolvedIndex,
+      )
+      const identifier = new Identifier(identifierBytes)
+      const soc = encryptionKey
+        ? await downloadEncryptedSOC(
+            this.bee,
+            ownerAddress,
+            identifier,
+            encryptionKey,
+            requestOptions,
+          )
+        : await downloadSOC(this.bee, ownerAddress, identifier, requestOptions)
+
+      const parsed = this.parseSequentialPayload(soc.payload, useTimestamp)
+      const nextIndex = this.sequentialNextIndex(resolvedIndex)
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "seqFeedDownloadRawPayloadResponse",
+            requestId,
+            payload: parsed.payload,
+            timestamp: parsed.timestamp,
+            feedIndex: resolvedIndex.toString(),
+            feedIndexNext: nextIndex.toString(),
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Sequential feed download raw payload successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Sequential feed download raw payload failed",
+      )
+    }
+  }
+
+  private async handleSequentialFeedDownloadReference(
+    message: SequentialFeedDownloadReferenceMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const {
+      requestId,
+      topic,
+      owner,
+      index,
+      at,
+      hasTimestamp,
+      encryptionKey,
+      lookupTimeoutMs,
+      requestOptions,
+    } = message
+
+    console.log("[Proxy] Sequential feed download reference request")
+
+    try {
+      if (!encryptionKey) {
+        throw new Error("Encryption key is required for downloadReference")
+      }
+
+      const resolvedOwner = await this.resolveSequentialOwner(owner)
+      const ownerAddress = new EthAddress(resolvedOwner)
+      const topicBytes = hexToUint8Array(topic)
+      const useTimestamp = hasTimestamp !== false
+      const resolvedIndex = await this.resolveSequentialIndex(
+        topicBytes,
+        ownerAddress,
+        index,
+        at,
+        useTimestamp,
+        requestOptions,
+        encryptionKey,
+        false,
+        lookupTimeoutMs,
+      )
+
+      const identifierBytes = this.makeSequentialFeedIdentifier(
+        topicBytes,
+        resolvedIndex,
+      )
+      const identifier = new Identifier(identifierBytes)
+      const soc = await downloadEncryptedSOC(
+        this.bee,
+        ownerAddress,
+        identifier,
+        encryptionKey,
+        requestOptions,
+      )
+
+      const parsed = this.parseSequentialPayload(soc.payload, useTimestamp)
+      if (parsed.payload.length !== 32 && parsed.payload.length !== 64) {
+        throw new Error(
+          "Sequential feed update does not contain a reference; use downloadPayload",
+        )
+      }
+      const referenceHex = uint8ArrayToHex(parsed.payload)
+      const nextIndex = this.sequentialNextIndex(resolvedIndex)
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "seqFeedDownloadReferenceResponse",
+            requestId,
+            reference: referenceHex,
+            feedIndex: resolvedIndex.toString(),
+            feedIndexNext: nextIndex.toString(),
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Sequential feed download reference successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Sequential feed download reference failed",
+      )
+    }
+  }
+
+  private buildSequentialPayload(
+    data: Uint8Array,
+    hasTimestamp: boolean,
+    at: bigint,
+  ): Uint8Array {
+    if (!hasTimestamp) {
+      return data
+    }
+    const timestamp = new Uint8Array(8)
+    const view = new DataView(timestamp.buffer)
+    view.setBigUint64(0, at, false)
+    return Binary.concatBytes(timestamp, data)
+  }
+
+  private async handleSequentialFeedUploadPayload(
+    message: SequentialFeedUploadPayloadMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const {
+      requestId,
+      topic,
+      signer,
+      data,
+      index,
+      at,
+      hasTimestamp,
+      lookupTimeoutMs,
+      options,
+      requestOptions,
+    } = message
+
+    console.log("[Proxy] Sequential feed upload payload request")
+
+    try {
+      if (!this.authenticated || !this.appSecret) {
+        throw new Error("Not authenticated. Please login first.")
+      }
+      if (!this.postageBatchId || !this.stamper) {
+        throw new Error(
+          "Postage batch ID and stamper required. Please login first.",
+        )
+      }
+
+      const signerKey = signer ?? this.appSecret
+      const signerKeyObj = new PrivateKey(signerKey)
+      const ownerAddress = signerKeyObj.publicKey().address()
+      const topicBytes = hexToUint8Array(topic)
+
+      const useTimestamp = hasTimestamp !== false
+      const atValue =
+        at !== undefined
+          ? this.parseFeedTimestamp(at)
+          : BigInt(Math.floor(Date.now() / 1000))
+      let resolvedIndex: bigint
+      if (index !== undefined) {
+        resolvedIndex = this.parseFeedIndex(index)
+      } else {
+        const latest = await this.findLatestSequentialIndex(
+          topicBytes,
+          ownerAddress,
+          requestOptions,
+          lookupTimeoutMs,
+        )
+        resolvedIndex =
+          latest === undefined ? 0n : this.sequentialNextIndex(latest)
+      }
+
+      const payload = this.buildSequentialPayload(data, useTimestamp, atValue)
+      if (payload.length < 1 || payload.length > 4096) {
+        throw new Error(
+          `Invalid payload length: ${payload.length} (expected 1-4096)`,
+        )
+      }
+
+      const identifierBytes = this.makeSequentialFeedIdentifier(
+        topicBytes,
+        resolvedIndex,
+      )
+      const identifier = new Identifier(identifierBytes)
+      const result = await uploadEncryptedSOC(
+        this.bee,
+        this.stamper,
+        signerKeyObj,
+        identifier,
+        payload,
+        undefined,
+        options,
+      )
+
+      await this.saveStamperState()
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "seqFeedUploadPayloadResponse",
+            requestId,
+            reference: uint8ArrayToHex(result.socAddress),
+            feedIndex: resolvedIndex.toString(),
+            owner: ownerAddress.toHex(),
+            encryptionKey: uint8ArrayToHex(result.encryptionKey),
+            tagUid: result.tagUid,
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Sequential feed upload payload successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Sequential feed upload payload failed",
+      )
+    }
+  }
+
+  private async handleSequentialFeedUploadRawPayload(
+    message: SequentialFeedUploadRawPayloadMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const {
+      requestId,
+      topic,
+      signer,
+      data,
+      index,
+      at,
+      hasTimestamp,
+      encryptionKey,
+      lookupTimeoutMs,
+      options,
+      requestOptions,
+    } = message
+
+    console.log("[Proxy] Sequential feed upload raw payload request")
+
+    try {
+      if (!this.authenticated || !this.appSecret) {
+        throw new Error("Not authenticated. Please login first.")
+      }
+      if (!this.postageBatchId || !this.stamper) {
+        throw new Error(
+          "Postage batch ID and stamper required. Please login first.",
+        )
+      }
+
+      const signerKey = signer ?? this.appSecret
+      const signerKeyObj = new PrivateKey(signerKey)
+      const ownerAddress = signerKeyObj.publicKey().address()
+      const topicBytes = hexToUint8Array(topic)
+
+      const useTimestamp = hasTimestamp !== false
+      const atValue =
+        at !== undefined
+          ? this.parseFeedTimestamp(at)
+          : BigInt(Math.floor(Date.now() / 1000))
+      let resolvedIndex: bigint
+      if (index !== undefined) {
+        resolvedIndex = this.parseFeedIndex(index)
+      } else {
+        const latest = await this.findLatestSequentialIndex(
+          topicBytes,
+          ownerAddress,
+          requestOptions,
+          lookupTimeoutMs,
+        )
+        resolvedIndex =
+          latest === undefined ? 0n : this.sequentialNextIndex(latest)
+      }
+
+      const payload = this.buildSequentialPayload(data, useTimestamp, atValue)
+      if (payload.length < 1 || payload.length > 4096) {
+        throw new Error(
+          `Invalid payload length: ${payload.length} (expected 1-4096)`,
+        )
+      }
+
+      const identifierBytes = this.makeSequentialFeedIdentifier(
+        topicBytes,
+        resolvedIndex,
+      )
+      const identifier = new Identifier(identifierBytes)
+
+      // Debug: log the values used for SOC address computation
+      console.log("[Proxy] Sequential feed upload details:", {
+        topic: uint8ArrayToHex(topicBytes),
+        owner: ownerAddress.toHex(),
+        index: resolvedIndex.toString(),
+        identifier: uint8ArrayToHex(identifierBytes),
+      })
+
+      // DEBUG: Log payload details for /bzz/ compatibility analysis
+      console.log("[Proxy] DEBUG - Payload for /bzz/ analysis:", {
+        inputDataLength: data.length,
+        inputDataHex:
+          uint8ArrayToHex(data).substring(0, 128) +
+          (data.length > 64 ? "..." : ""),
+        hasTimestamp: useTimestamp,
+        timestamp: atValue.toString(),
+        finalPayloadLength: payload.length,
+        finalPayloadHex:
+          uint8ArrayToHex(payload).substring(0, 128) +
+          (payload.length > 64 ? "..." : ""),
+        expectedWrappedLength: payload.length + 8, // span(8) + payload
+        isValidV1Length: payload.length + 8 === 48 || payload.length + 8 === 80,
+        note: "For /bzz/, wrapped chunk must be 48 bytes (unenc) or 80 bytes (enc)",
+      })
+
+      // Upload SOC - use encryption if key provided, otherwise use /soc endpoint
+      // The /soc endpoint is needed for non-encrypted uploads because:
+      // - Small SOCs (< 4104 bytes) are misidentified as CAC by /chunks endpoint
+      // - /soc endpoint explicitly handles SOC without size-based detection
+      // - Preserves v1 format (48-byte CAC) required for /bzz/ compatibility
+      let result
+      if (encryptionKey) {
+        result = await uploadEncryptedSOC(
+          this.bee,
+          this.stamper,
+          signerKeyObj,
+          identifier,
+          payload,
+          hexToUint8Array(encryptionKey),
+          options,
+        )
+      } else {
+        // Use /soc endpoint for non-encrypted uploads (v1 format for /bzz/ compat)
+        result = await uploadSOCViaSocEndpoint(
+          this.bee,
+          this.stamper,
+          signerKeyObj,
+          identifier,
+          payload,
+          options,
+        )
+      }
+
+      await this.saveStamperState()
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "seqFeedUploadRawPayloadResponse",
+            requestId,
+            reference: uint8ArrayToHex(result.socAddress),
+            feedIndex: resolvedIndex.toString(),
+            owner: ownerAddress.toHex(),
+            encryptionKey: encryptionKey ? encryptionKey : undefined,
+            tagUid: result.tagUid,
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Sequential feed upload raw payload successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Sequential feed upload raw payload failed",
+      )
+    }
+  }
+
+  private async handleSequentialFeedUploadReference(
+    message: SequentialFeedUploadReferenceMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const {
+      requestId,
+      topic,
+      signer,
+      reference,
+      index,
+      at,
+      hasTimestamp,
+      lookupTimeoutMs,
+      options,
+      requestOptions,
+    } = message
+
+    console.log("[Proxy] Sequential feed upload reference request")
+
+    try {
+      if (!this.authenticated || !this.appSecret) {
+        throw new Error("Not authenticated. Please login first.")
+      }
+      if (!this.postageBatchId || !this.stamper) {
+        throw new Error(
+          "Postage batch ID and stamper required. Please login first.",
+        )
+      }
+
+      const signerKey = signer ?? this.appSecret
+      const signerKeyObj = new PrivateKey(signerKey)
+      const ownerAddress = signerKeyObj.publicKey().address()
+      const topicBytes = hexToUint8Array(topic)
+
+      const useTimestamp = hasTimestamp !== false
+      const atValue =
+        at !== undefined
+          ? this.parseFeedTimestamp(at)
+          : BigInt(Math.floor(Date.now() / 1000))
+      let resolvedIndex: bigint
+      if (index !== undefined) {
+        resolvedIndex = this.parseFeedIndex(index)
+      } else {
+        const latest = await this.findLatestSequentialIndex(
+          topicBytes,
+          ownerAddress,
+          requestOptions,
+          lookupTimeoutMs,
+        )
+        resolvedIndex =
+          latest === undefined ? 0n : this.sequentialNextIndex(latest)
+      }
+
+      const referenceBytes = hexToUint8Array(reference)
+      const payload = this.buildSequentialPayload(
+        referenceBytes,
+        useTimestamp,
+        atValue,
+      )
+      if (payload.length < 1 || payload.length > 4096) {
+        throw new Error(
+          `Invalid payload length: ${payload.length} (expected 1-4096)`,
+        )
+      }
+
+      const identifierBytes = this.makeSequentialFeedIdentifier(
+        topicBytes,
+        resolvedIndex,
+      )
+      const identifier = new Identifier(identifierBytes)
+
+      // uploadReference always uses encryption
+      const encResult = await uploadEncryptedSOC(
+        this.bee,
+        this.stamper,
+        signerKeyObj,
+        identifier,
+        payload,
+        undefined,
+        options,
+      )
+      const result = encResult
+      const encryptionKeyResult = uint8ArrayToHex(encResult.encryptionKey)
+
+      await this.saveStamperState()
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "seqFeedUploadReferenceResponse",
+            requestId,
+            reference: uint8ArrayToHex(result.socAddress),
+            feedIndex: resolvedIndex.toString(),
+            owner: ownerAddress.toHex(),
+            encryptionKey: encryptionKeyResult,
+            tagUid: result.tagUid,
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Sequential feed upload reference successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "Sequential feed upload reference failed",
+      )
+    }
+  }
+
   // ============================================================================
   // ACT (Access Control Tries) Handlers
   // ============================================================================
@@ -2615,6 +3763,99 @@ export class SwarmIdProxy {
     }
 
     console.log("[Proxy] Postage batch returned:", postageBatch.batchID)
+  }
+
+  /**
+   * Handle createFeedManifest request
+   * Creates a feed manifest for accessing feed content via URL
+   */
+  private async handleCreateFeedManifest(
+    message: CreateFeedManifestMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    console.log("[Proxy] Create feed manifest request")
+
+    const { topic, owner, feedType, uploadOptions, requestOptions } = message
+
+    // Resolve owner - use provided or fall back to app signer
+    let resolvedOwner = owner
+    if (!resolvedOwner && this.appSecret) {
+      const signerKeyObj = new PrivateKey(this.appSecret)
+      resolvedOwner = signerKeyObj.publicKey().address().toHex()
+    }
+
+    if (!resolvedOwner) {
+      this.sendErrorToParent(
+        event,
+        message.requestId,
+        "No owner provided and no app signer available",
+      )
+      return
+    }
+
+    if (!this.postageBatchId) {
+      this.sendErrorToParent(
+        event,
+        message.requestId,
+        "No postage batch configured",
+      )
+      return
+    }
+
+    if (!this.stamper) {
+      this.sendErrorToParent(
+        event,
+        message.requestId,
+        "Stamper not initialized. Please login first.",
+      )
+      return
+    }
+
+    try {
+      // DEBUG: Log manifest creation details for /bzz/ compatibility analysis
+      console.log("[Proxy] DEBUG - Feed manifest creation:", {
+        topic,
+        providedOwner: owner,
+        resolvedOwner,
+        feedType: feedType || "Sequence",
+        encrypt: uploadOptions?.encrypt !== false,
+        note: "resolvedOwner MUST match the owner used for feed upload",
+      })
+
+      // Use createFeedManifestDirect to build and upload the manifest locally
+      // instead of calling bee.createFeedManifest (which uses /feeds endpoint)
+      const result = await createFeedManifestDirect(
+        this.bee,
+        this.stamper,
+        topic,
+        resolvedOwner,
+        {
+          encrypt: uploadOptions?.encrypt !== false, // Default encrypted
+          feedType: feedType, // "Sequence" or "Epoch"
+        },
+        uploadOptions,
+        requestOptions,
+      )
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "createFeedManifestResponse",
+            requestId: message.requestId,
+            reference: result.reference,
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] Feed manifest created:", result.reference)
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        message.requestId,
+        error instanceof Error ? error.message : "Create feed manifest failed",
+      )
+    }
   }
 }
 

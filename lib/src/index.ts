@@ -152,6 +152,19 @@ export type {
   SingleOwnerChunk,
   SocUploadResult,
   SocRawUploadResult,
+  FeedReaderOptions,
+  FeedWriterOptions,
+  FeedReader,
+  FeedWriter,
+  SequentialFeedReaderOptions,
+  SequentialFeedWriterOptions,
+  SequentialFeedUpdateOptions,
+  SequentialFeedUploadOptions,
+  SequentialFeedPayloadResult,
+  SequentialFeedReferenceResult,
+  SequentialFeedUploadResult,
+  SequentialFeedReader,
+  SequentialFeedWriter,
   UploadProgress,
   RequestOptions,
   DownloadOptions,
@@ -182,11 +195,31 @@ export type {
   SocDownloadMessage,
   SocRawDownloadMessage,
   SocGetOwnerMessage,
+  EpochFeedDownloadReferenceMessage,
+  EpochFeedUploadReferenceMessage,
+  FeedGetOwnerMessage,
+  SequentialFeedGetOwnerMessage,
+  SequentialFeedDownloadPayloadMessage,
+  SequentialFeedDownloadRawPayloadMessage,
+  SequentialFeedDownloadReferenceMessage,
+  SequentialFeedUploadPayloadMessage,
+  SequentialFeedUploadRawPayloadMessage,
+  SequentialFeedUploadReferenceMessage,
   SocUploadResponseMessage,
   SocRawUploadResponseMessage,
   SocDownloadResponseMessage,
   SocRawDownloadResponseMessage,
   SocGetOwnerResponseMessage,
+  EpochFeedDownloadReferenceResponseMessage,
+  EpochFeedUploadReferenceResponseMessage,
+  FeedGetOwnerResponseMessage,
+  SequentialFeedGetOwnerResponseMessage,
+  SequentialFeedDownloadPayloadResponseMessage,
+  SequentialFeedDownloadRawPayloadResponseMessage,
+  SequentialFeedDownloadReferenceResponseMessage,
+  SequentialFeedUploadPayloadResponseMessage,
+  SequentialFeedUploadRawPayloadResponseMessage,
+  SequentialFeedUploadReferenceResponseMessage,
 } from "./types"
 
 // Entity types from schemas
@@ -285,6 +318,31 @@ export { SWARM_SECRET_PREFIX } from "./types"
 
 // URL building utilities
 export { buildAuthUrl } from "./utils/url"
+
+// Manifest builder utilities for /bzz/ feed compatibility
+export {
+  buildBzzCompatibleManifest,
+  buildBzzManifestNode,
+  buildMinimalManifest,
+  extractReferenceFromManifest,
+  extractEntryFromManifest,
+  extractContentFromFlatManifest,
+  padPayloadForSOCDetection,
+  MAX_PADDED_PAYLOAD_SIZE,
+} from "./proxy/manifest-builder"
+
+export type {
+  BzzCompatibleManifestResult,
+  BzzManifestNodeResult,
+} from "./proxy/manifest-builder"
+
+// Mantaray tree utilities for recursive upload/download
+export {
+  saveMantarayTreeRecursively,
+  loadMantarayTreeWithChunkAPI,
+} from "./proxy/mantaray"
+
+export type { UploadCallback } from "./proxy/mantaray"
 
 // Time and session constants
 export {
