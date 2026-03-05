@@ -775,6 +775,13 @@ export class SwarmIdProxy {
         this.postageBatchId = undefined
         this.signerKey = undefined
       }
+
+      // Notify parent so feedSignerAddress is available immediately on load
+      this.sendToParent({
+        type: "authSuccess",
+        origin: this.parentOrigin!,
+        feedSignerAddress: this.computeFeedSignerAddress(),
+      })
     } else {
       console.log(
         "[Proxy] No valid auth data found in shared storage for:",

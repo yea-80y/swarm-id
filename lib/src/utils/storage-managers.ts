@@ -165,6 +165,7 @@ export function serializeConnectedApp(
     appDescription: app.appDescription,
     connectedUntil: app.connectedUntil,
     appSecret: app.appSecret,
+    feedSignerKey: app.feedSignerKey,
   }
 }
 

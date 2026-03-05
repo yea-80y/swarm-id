@@ -98,6 +98,13 @@ async function updateAuthStatus(isAuthenticated: boolean) {
 				currentIdentityName = name
 				identity = { id, name, address }
 			}
+
+			const feedSignerAddress = client!.getUserFeedSignerAddress()
+			if (feedSignerAddress) {
+				logStore.log(`[Phase 3] Feed signer address: 0x${feedSignerAddress}`)
+			} else {
+				logStore.log('[Phase 3] No feed signer address received', 'warn')
+			}
 		} catch (error) {
 			logStore.log(
 				`Failed to get connection info: ${error instanceof Error ? error.message : String(error)}`,

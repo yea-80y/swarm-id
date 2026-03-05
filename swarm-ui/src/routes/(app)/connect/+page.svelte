@@ -283,7 +283,10 @@
 				const feedSigner = await deriveFeedSigner(account.type, masterKey)
 				feedSignerKey = feedSigner.privateKey.toHex()
 			} catch (err) {
-				console.warn('Feed signer derivation failed — user-owned feed writes unavailable', err)
+				console.warn(
+					'Feed signer derivation failed:',
+					err instanceof Error ? err.message : String(err),
+				)
 			}
 
 			updateSelectedIdentity(appSecret, feedSignerKey)
