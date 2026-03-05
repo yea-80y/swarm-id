@@ -180,7 +180,7 @@ pnpm dev:swarm-ui   # http://localhost:5174
 | Phase | Status | Description |
 |---|---|---|
 | 1 — Fork fixes | ✅ Complete | PRF salt, iOS postMessage, BIP-39 backup, uploadFile encryption |
-| 2 — Feed signer backup | ✅ Complete | X25519 ECIES recovery feed, BIP-39 covers passkey path, private key export |
+| 2 — Feed signer backup | 🔶 Partial | Crypto code done (ECIES, feed-recovery.ts, key export). UI not wired yet. |
 | 3 — User-owned feed writes | ✅ Complete | BIP-44 feed signer, client-side signing, feedSignerAddress to parent |
 | 4 — ENS sub-records | Planned | ENS text records as feed key recovery pointers |
 
