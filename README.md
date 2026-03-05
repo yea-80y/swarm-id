@@ -1,3 +1,154 @@
+# WoCo Fork — Swarm Identity Management
+
+> **This is a fork of [snaha/swarm-id](https://github.com/snaha/swarm-id) maintained by [WoCo](https://github.com/yea-80y/WoCo-Event-App).**
+> The fork targets production use in the WoCo event platform and contributes fixes intended for upstreaming to snaha/swarm-id.
+> See [upstream issues referenced below](#changes-from-upstream).
+
+---
+
+## Changes from Upstream
+
+### 1. PRF Salt — Domain-Agnostic Key Derivation (fixes portability)
+
+**File:** `swarm-ui/src/lib/passkey.ts`
+
+The upstream salt for passkey PRF evaluation was `SHA256("${hostname}:ethereum-wallet-v1")`, which binds the derived key to the deployment domain. If the identity service moves to a new domain, users lose access to their keys.
+
+This fork changes the salt to:
+
+```ts
+const PRF_SALT_INPUT = 'hd-wallet-seed-v1'
+```
+
+This is a **purpose-describing string**, not a domain-specific one. The derived key describes *what it is* (an HD wallet seed) rather than *where it lives*. Platform-specificity is achieved via BIP-44 derivation paths, not the salt — so the same passkey can produce the same keys across any compliant identity service.
+
+> **Breaking change for existing accounts at id.ethswarm.org.** WoCo users are unaffected (WoCo has its own passkey implementation with a separate salt). A migration path should be included if proposing this as an upstream PR.
+
+**Related upstream issue:** [#189](https://github.com/snaha/swarm-id/issues/189)
+
+---
+
+### 2. iOS Safari postMessage Fallback (~90% coverage)
+
+**Files:** `swarm-ui/src/routes/(app)/connect/+page.svelte`, `lib/src/swarm-id-proxy.ts`
+
+Safari's Intelligent Tracking Prevention (ITP) partitions `localStorage` between popup windows and their opener iframes, breaking the authentication flow on iOS. The upstream workaround requires disabling cross-site tracking, which is not acceptable for production.
+
+This fork adds a `postMessage` fallback:
+
+- When the auth popup closes with `proxyMode=true`, it sends the derived secret directly to `window.opener` via `postMessage`
+- The iframe (`SwarmIdProxy`) receives this via `handleSetSecretFromPopup()` — same-origin validated, no spoofing possible
+- The `PopupToIframeMessageSchema` / `SetSecretMessage` types already existed in the codebase; they are now wired up
+
+**Remaining 10%:** Safari also blocks storage events in all cross-context scenarios, breaking session revocation (logout in one tab not reflected in others). A lightweight server-side session endpoint is needed for full iOS production support — this is tracked but not yet built.
+
+**Related upstream issue:** [#167](https://github.com/snaha/swarm-id/issues/167)
+
+---
+
+### 3. Passkey BIP-39 Mnemonic Backup (implements account recovery)
+
+**Files:**
+- `swarm-ui/src/lib/utils/passkey-mnemonic.ts` — core crypto utilities
+- `swarm-ui/src/routes/(app)/(create)/passkey/mnemonic/+page.svelte` — backup display UI
+- `swarm-ui/src/routes/(app)/(create)/passkey/recover/+page.svelte` — recovery UI
+
+Passkey accounts had no account recovery path — if the authenticator was lost, the account was permanently inaccessible ([#191](https://github.com/snaha/swarm-id/issues/191)).
+
+This fork implements BIP-39 mnemonic backup:
+
+**Key insight:** The 32-byte HKDF output (master key) that the passkey PRF produces is exactly 256 bits — the entropy for a 24-word BIP-39 mnemonic. The round-trip is lossless:
+
+```
+passkey PRF → HKDF → 32-byte masterKey
+masterKey bytes → Mnemonic.fromEntropy() → 24 words
+24 words → Mnemonic.fromPhrase().entropy → same 32 bytes
+```
+
+**What was built:**
+
+- `masterKeyToMnemonic(masterKey)` — derives the 24-word phrase
+- `mnemonicToMasterKey(phrase)` — recovers the same master key
+- `storeMnemonicBackup(credentialId, masterKey)` — AES-GCM encrypts the mnemonic with a random device key and stores both in IndexedDB (`swarm-id-passkey-backup` DB, keyed by credentialId)
+- `loadMnemonicBackup(credentialId)` / `deleteMnemonicBackup(credentialId)` — load and cleanup
+
+**UX flow:**
+
+1. User creates passkey account → biometric prompt
+2. **New:** User lands on mnemonic page showing 24 words in a numbered grid
+3. Copy button available; warning box displayed ("never enter this anywhere")
+4. Confirmation checkbox gates the continue button
+5. On confirm: backup stored to IndexedDB → navigate to identity creation as before
+
+**Recovery:** `/passkey/recover` route — enter 24 words, re-derive master key, look up account by derived Ethereum address, restore session identically to a successful passkey auth.
+
+**Related upstream issue:** [#191](https://github.com/snaha/swarm-id/issues/191)
+
+---
+
+### 4. uploadFile() Encryption (fixes security bug)
+
+**File:** `lib/src/swarm-id-proxy.ts` — `handleUploadFile()`
+
+The upstream `uploadFile()` proxy handler called `bee.uploadFile()` directly, uploading content to Swarm in plaintext ([#187](https://github.com/snaha/swarm-id/issues/187)).
+
+This fork routes all file uploads through the existing encrypted chunk pipeline:
+
+```
+before: bee.uploadFile(postageBatchId, data, name)   ← plaintext
+after:  uploadEncryptedDataWithSigning(context, data, swarmEncryptionKey)  ← encrypted
+```
+
+- Uses each account's `swarmEncryptionKey` (a 32-byte key already derived from masterKey via HMAC and stored with the account)
+- Retrieved via the existing `lookupAccountForApp()` method
+- Returns a 64-byte encrypted reference (128 hex chars) — the `ReferenceSchema` already supported this format
+- **No plaintext fallback** — if the encryption key cannot be resolved, the upload is refused
+
+> **Note:** The `name` / content-type metadata that `bee.uploadFile()` supported is not preserved in the encrypted chunk path. File bytes are fully preserved. Mantaray manifest wrapping for filename metadata is a follow-up.
+
+**Related upstream issue:** [#187](https://github.com/snaha/swarm-id/issues/187)
+
+---
+
+## Build Setup
+
+```bash
+# 1. Initialize the bee-js submodule (required — it's empty after clone)
+git submodule update --init --recursive
+
+# 2. Install workspace dependencies
+pnpm install
+
+# 3. Build the forked bee-js (webpack, ~30s)
+pnpm build:bee-js
+
+# 4. Build the lib package (rollup, ~20s)
+pnpm --filter @swarm-id/lib build
+
+# 5. Start identity UI dev server
+pnpm dev:swarm-ui   # http://localhost:5174
+```
+
+---
+
+## Roadmap
+
+| Phase | Status | Description |
+|---|---|---|
+| 1 — Fork fixes | ✅ Complete | PRF salt, iOS postMessage, BIP-39 backup, uploadFile encryption |
+| 2 — Feed signer backup | Planned | X25519 ECIES seals secp256k1 feed signer → Swarm recovery feed |
+| 3 — User-owned feed writes | Planned | Personal feeds signed client-side, bypasses server for user data |
+| 4 — ENS sub-records | Planned | ENS text records as feed key recovery pointers |
+
+---
+
+## Upstream Credit
+
+This project is built on [snaha/swarm-id](https://github.com/snaha/swarm-id) (Apache 2.0).
+The encrypted bee-js fork is [agazso/bee-js](https://github.com/agazso/bee-js/tree/feat/encrypted-chunk-streams).
+
+---
+
 # Swarm Identity Management
 
 This monorepo implements a cross-browser compatible authentication and identity management system for Swarm dApps.

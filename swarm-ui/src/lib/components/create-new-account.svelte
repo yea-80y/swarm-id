@@ -111,6 +111,10 @@
 				<a href={resolve(routes.AGENT_NEW)}>Sign up as agent</a>
 			</Typography>
 		{/if}
+		<Typography variant="small">
+			<a href={resolve(routes.PASSKEY_RECOVER)}>Lost passkey access? Recover with recovery phrase</a
+			>
+		</Typography>
 	</div>
 </Vertical>
 

@@ -20,6 +20,7 @@
 	import { onMount } from 'svelte'
 	import ErrorMessage from '$lib/components/ui/error-message.svelte'
 	import { deriveAccountSwarmEncryptionKey } from '@swarm-id/lib'
+	import { deriveBip44FeedSigner } from '$lib/utils/feed-signer'
 	import type { AccountSyncType } from '$lib/types'
 
 	let accountName = $state('Passkey')
@@ -73,6 +74,11 @@
 			const swarmEncryptionKey = await deriveAccountSwarmEncryptionKey(account.masterKey.toHex())
 			console.log('🔑 SwarmEncryptionKey derived')
 
+			// Derive feed signer address (BIP-44 m/44'/60'/1'/0/0).
+			// The address is safe to store; the private key stays in session only.
+			const feedSigner = deriveBip44FeedSigner(account.masterKey)
+			console.log('🔑 Feed signer address derived:', feedSigner.address.toHex())
+
 			// Store account WITHOUT masterKey (passkey accounts never persist masterKey)
 			const newAccount = accountsStore.addAccount({
 				id: account.ethereumAddress,
@@ -81,6 +87,7 @@
 				type: 'passkey',
 				credentialId: account.credentialId,
 				swarmEncryptionKey: swarmEncryptionKey,
+				feedSignerAddress: feedSigner.address.toHex(),
 			})
 			sessionStore.setAccount(newAccount)
 			sessionStore.setSyncedCreation(accountType === 'synced')
@@ -89,8 +96,8 @@
 			sessionStore.setTemporaryMasterKey(account.masterKey)
 			console.log('🔑 MasterKey stored in session (temporary)')
 
-			// Navigate to identity creation page
-			goto(resolve(routes.IDENTITY_NEW))
+			// Navigate to mnemonic backup page before identity creation
+			goto(resolve(routes.PASSKEY_MNEMONIC))
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to create passkey identity'
 			console.error('❌ Passkey creation failed:', err)

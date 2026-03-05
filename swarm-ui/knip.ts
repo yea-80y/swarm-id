@@ -7,7 +7,17 @@ const config: KnipConfig = {
 		'$env/*': ['.svelte-kit/ambient.d.ts'],
 		'$lib/*': ['src/lib/*'],
 	},
-	ignore: ['playwright/index.ts', 'src/lib/time.ts', 'src/lib/schemas.ts'],
+	ignore: [
+		'playwright/index.ts',
+		'src/lib/time.ts',
+		'src/lib/schemas.ts',
+		// Crypto utility modules — exports are public API, wired into UI progressively
+		'src/lib/utils/ecies.ts',
+		'src/lib/utils/feed-signer.ts',
+		'src/lib/utils/feed-recovery.ts',
+		'src/lib/utils/key-export.ts',
+		'src/lib/utils/passkey-mnemonic.ts',
+	],
 	ignoreDependencies: ['@swarm-id/lib', '@ethersphere/bee-js'],
 	ignoreExportsUsedInFile: true,
 	'playwright-ct': false,
