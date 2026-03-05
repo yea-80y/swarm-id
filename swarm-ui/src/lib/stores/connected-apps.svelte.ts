@@ -45,6 +45,7 @@ export const connectedAppsStore = {
 			appIcon?: string
 			appDescription?: string
 			appSecret?: string
+			feedSignerKey?: string
 		},
 		defaultConnectionTime: number,
 	): ConnectedApp {
@@ -61,6 +62,7 @@ export const connectedAppsStore = {
 				appIcon: appData.appIcon ?? existingApp.appIcon,
 				appDescription: appData.appDescription ?? existingApp.appDescription,
 				appSecret: appData.appSecret ?? existingApp.appSecret,
+				feedSignerKey: appData.feedSignerKey ?? existingApp.feedSignerKey,
 				lastConnectedAt: now,
 				connectedUntil: now + defaultConnectionTime,
 			}
@@ -80,6 +82,7 @@ export const connectedAppsStore = {
 				appIcon: appData.appIcon,
 				appDescription: appData.appDescription,
 				appSecret: appData.appSecret,
+				feedSignerKey: appData.feedSignerKey,
 				lastConnectedAt: now,
 				connectedUntil: now + defaultConnectionTime,
 			}

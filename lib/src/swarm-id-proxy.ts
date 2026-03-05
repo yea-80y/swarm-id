@@ -38,12 +38,17 @@ import type {
   ActGetGranteesMessage,
   GetPostageBatchMessage,
   CreateFeedManifestMessage,
+  GetUserFeedSignerMessage,
+  UserEpochFeedUploadReferenceMessage,
   AppMetadata,
   PostageStamp,
   PostageBatch,
   ConnectedApp,
 } from "./types"
-import { ParentToIframeMessageSchema, PopupToIframeMessageSchema } from "./types"
+import {
+  ParentToIframeMessageSchema,
+  PopupToIframeMessageSchema,
+} from "./types"
 import {
   Bee,
   makeContentAddressedChunk,
@@ -123,6 +128,7 @@ export class SwarmIdProxy {
   private authenticated: boolean = false
   private authLoading: boolean = true // Start in loading state
   private appSecret: string | undefined
+  private userFeedSignerKey: string | undefined // BIP-44 user feed signer (stays in proxy, never sent to parent)
   private postageBatchId: string | undefined
   private signerKey: string | undefined
   private stamper: UtilizationAwareStamper | undefined
@@ -227,6 +233,7 @@ export class SwarmIdProxy {
     console.log("[Proxy] Authenticating from storage event")
 
     this.appSecret = connectedApp.appSecret
+    this.userFeedSignerKey = connectedApp.feedSignerKey
     this.authenticated = true
     this.authLoading = false
     this.isConnecting = false
@@ -244,6 +251,7 @@ export class SwarmIdProxy {
     this.sendToParent({
       type: "authSuccess",
       origin: this.parentOrigin!,
+      feedSignerAddress: this.computeFeedSignerAddress(),
     })
   }
 
@@ -278,9 +286,12 @@ export class SwarmIdProxy {
       return
     }
 
-    console.log("[Proxy] Authenticating from popup postMessage (iOS Safari fallback)")
+    console.log(
+      "[Proxy] Authenticating from popup postMessage (iOS Safari fallback)",
+    )
 
     this.appSecret = message.data.secret
+    this.userFeedSignerKey = message.data.feedSignerKey
     this.authenticated = true
     this.authLoading = false
     this.isConnecting = false
@@ -299,6 +310,7 @@ export class SwarmIdProxy {
     this.sendToParent({
       type: "authSuccess",
       origin: this.parentOrigin,
+      feedSignerAddress: this.computeFeedSignerAddress(),
     })
   }
 
@@ -340,6 +352,30 @@ export class SwarmIdProxy {
    */
   getSignerKey(): string | undefined {
     return this.signerKey
+  }
+
+  /**
+   * Get the user's feed signer Ethereum address (public, safe to expose).
+   * Returns undefined if no feed signer was derived during auth.
+   */
+  getUserFeedSignerAddress(): string | undefined {
+    return this.computeFeedSignerAddress()
+  }
+
+  /**
+   * Derive Ethereum address from the user's feed signer private key.
+   * Returns undefined if userFeedSignerKey is not set.
+   */
+  private computeFeedSignerAddress(): string | undefined {
+    if (!this.userFeedSignerKey) return undefined
+    try {
+      return new PrivateKey(this.userFeedSignerKey)
+        .publicKey()
+        .address()
+        .toHex()
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -689,6 +725,14 @@ export class SwarmIdProxy {
         await this.handleCreateFeedManifest(message, event)
         break
 
+      case "getUserFeedSigner":
+        this.handleGetUserFeedSigner(message, event)
+        break
+
+      case "userEpochFeedUploadReference":
+        await this.handleUserEpochFeedUploadReference(message, event)
+        break
+
       default:
         // TypeScript should ensure this is never reached
         const exhaustiveCheck: never = message
@@ -714,6 +758,7 @@ export class SwarmIdProxy {
         this.parentOrigin,
       )
       this.appSecret = sharedData.secret
+      this.userFeedSignerKey = sharedData.feedSignerKey
       this.authenticated = true
       this.authLoading = false
       this.showAuthButton()
@@ -888,7 +933,7 @@ export class SwarmIdProxy {
    * Returns the secret and identityId if found and connection is valid.
    */
   private lookupAppSecretFromSharedStorage():
-    | { secret: string; identityId: string }
+    | { secret: string; identityId: string; feedSignerKey?: string }
     | undefined {
     if (!this.parentOrigin) {
       return undefined
@@ -922,6 +967,7 @@ export class SwarmIdProxy {
       return {
         secret: connectedApp.appSecret,
         identityId: connectedApp.identityId,
+        feedSignerKey: connectedApp.feedSignerKey,
       }
     } catch (error) {
       console.error(
@@ -951,6 +997,7 @@ export class SwarmIdProxy {
     this.authenticated = false
     this.authLoading = false
     this.appSecret = undefined
+    this.userFeedSignerKey = undefined
     this.postageBatchId = undefined
     this.signerKey = undefined
     this.stamper = undefined
@@ -1520,51 +1567,54 @@ export class SwarmIdProxy {
     message: UploadFileMessage,
     event: MessageEvent,
   ): Promise<void> {
-    const { requestId, data, name, options, requestOptions } = message
+    const { requestId, data, name: _name, options, requestOptions } = message
 
-    console.log(
-      "[Proxy] Upload file request, name:",
-      name,
-      "size:",
-      data ? data.length : 0,
-    )
+    console.log("[Proxy] Upload file request, size:", data ? data.length : 0)
 
     try {
       if (!this.authenticated || !this.appSecret) {
         throw new Error("Not authenticated. Please login first.")
       }
 
-      // Check if only signer is available (no batch ID)
-      if (this.signerKey && !this.postageBatchId) {
+      if (!this.signerKey || !this.postageBatchId) {
         throw new Error(
-          "Signed uploads for files not yet implemented. Please use uploadChunk for signed uploads, or provide a postage batch ID for automatic chunking.",
+          "Signer key and postage batch ID required. Please login first.",
         )
       }
 
-      if (!this.postageBatchId) {
+      if (!this.stamper) {
+        throw new Error("Stamper not initialized. Please login first.")
+      }
+
+      // Resolve account encryption key — required, no plaintext fallback
+      const accountInfo = this.lookupAccountForApp()
+      if (!accountInfo) {
         throw new Error(
-          "No postage batch ID available. Please authenticate with a valid batch ID.",
+          "Could not resolve encryption key for this app. Please reconnect.",
         )
       }
+
       console.log(
-        "[Proxy] Uploading file to Bee at:",
+        "[Proxy] Uploading encrypted file to Bee at:",
         this.beeApiUrl,
-        "with batch:",
-        this.postageBatchId,
+        "size:",
+        data ? data.length : 0,
       )
 
-      // Upload file using bee-js
-      const uploadResult = await this.bee.uploadFile(
-        this.postageBatchId,
+      // Encrypt and upload using the account's swarmEncryptionKey
+      const context = { bee: this.bee, stamper: this.stamper }
+      const uploadResult = await uploadEncryptedDataWithSigning(
+        context,
         data,
-        name,
+        accountInfo.encryptionKey,
         options,
+        undefined,
         requestOptions,
       )
 
       console.log(
-        "[Proxy] File upload successful, reference:",
-        uploadResult.reference.toHex(),
+        "[Proxy] Encrypted file upload successful, reference:",
+        uploadResult.reference,
       )
 
       if (event.source) {
@@ -1572,14 +1622,14 @@ export class SwarmIdProxy {
           {
             type: "uploadFileResponse",
             requestId,
-            reference: uploadResult.reference.toHex(),
+            reference: uploadResult.reference,
             tagUid: uploadResult.tagUid,
           } satisfies IframeToParentMessage,
           { targetOrigin: event.origin },
         )
       }
 
-      console.log("[Proxy] File uploaded:", uploadResult.reference.toHex())
+      console.log("[Proxy] File uploaded (encrypted):", uploadResult.reference)
     } catch (error) {
       this.sendErrorToParent(
         event,
@@ -3912,6 +3962,154 @@ export class SwarmIdProxy {
         event,
         message.requestId,
         error instanceof Error ? error.message : "Create feed manifest failed",
+      )
+    }
+  }
+
+  // ============================================================================
+  // Phase 3: User-owned feed operations
+  // ============================================================================
+
+  /**
+   * Return the user's feed signer Ethereum address to the parent.
+   * The private key is never shared — only the address (public info).
+   */
+  private handleGetUserFeedSigner(
+    message: GetUserFeedSignerMessage,
+    event: MessageEvent,
+  ): void {
+    const { requestId } = message
+    console.log("[Proxy] Get user feed signer request")
+
+    if (event.source) {
+      ;(event.source as WindowProxy).postMessage(
+        {
+          type: "getUserFeedSignerResponse",
+          requestId,
+          feedSignerAddress: this.computeFeedSignerAddress(),
+        } satisfies IframeToParentMessage,
+        { targetOrigin: event.origin },
+      )
+    }
+  }
+
+  /**
+   * Write a reference to a user-owned epoch feed.
+   * Identical to handleEpochFeedUploadReference but signs with the user's
+   * BIP-44 feed signer instead of the app secret.
+   * The feed signer private key never leaves the proxy.
+   */
+  private async handleUserEpochFeedUploadReference(
+    message: UserEpochFeedUploadReferenceMessage,
+    event: MessageEvent,
+  ): Promise<void> {
+    const { requestId, topic, at, reference, encryptionKey, hints } = message
+
+    console.log("[Proxy] User epoch feed upload reference request", {
+      topic,
+      at,
+      referenceLength: reference.length,
+      hasEncryptionKey: !!encryptionKey,
+    })
+
+    try {
+      if (!this.authenticated || !this.appSecret) {
+        throw new Error("Not authenticated. Please login first.")
+      }
+
+      if (!this.postageBatchId || !this.stamper) {
+        throw new Error(
+          "Postage batch ID and stamper required. Please login first.",
+        )
+      }
+
+      if (!this.userFeedSignerKey) {
+        throw new Error(
+          "User feed signer not available. Re-authenticate to enable user-owned feed writes.",
+        )
+      }
+
+      const signerKeyObj = new PrivateKey(this.userFeedSignerKey)
+      const topicObj = new Topic(hexToUint8Array(topic))
+      const ownerHex = signerKeyObj.publicKey().address().toHex()
+      const ownerAddress = new EthAddress(ownerHex)
+      const updater = createEpochUpdater({
+        bee: this.bee,
+        topic: topicObj,
+        owner: ownerAddress,
+        signer: signerKeyObj,
+      })
+      const atValue = this.parseFeedTimestamp(at)
+      const epochEncryptionKey = encryptionKey
+        ? hexToUint8Array(encryptionKey)
+        : undefined
+
+      const epochHints = hints?.lastEpoch
+        ? {
+            lastEpoch: {
+              start: BigInt(hints.lastEpoch.start),
+              level: hints.lastEpoch.level,
+            },
+            lastTimestamp: hints.lastTimestamp
+              ? BigInt(hints.lastTimestamp)
+              : undefined,
+          }
+        : undefined
+
+      console.log("[Proxy] User epoch upload", {
+        owner: ownerHex,
+        at: atValue.toString(),
+        hasEncryptionKey: !!epochEncryptionKey,
+      })
+
+      const referenceBytes = hexToUint8Array(reference)
+      const updateResult = await updater.update(
+        atValue,
+        referenceBytes,
+        this.stamper,
+        epochEncryptionKey,
+        epochHints,
+      )
+
+      const readBackFinder = createAsyncEpochFinder({
+        bee: this.bee,
+        topic: topicObj,
+        owner: ownerAddress,
+        encryptionKey: epochEncryptionKey,
+      })
+      const readBack = await readBackFinder.findAt(atValue, atValue)
+      console.log("[Proxy] User epoch upload read-back", {
+        at: atValue.toString(),
+        found: !!readBack,
+      })
+
+      await this.saveStamperState()
+
+      if (event.source) {
+        ;(event.source as WindowProxy).postMessage(
+          {
+            type: "epochFeedUploadReferenceResponse",
+            requestId,
+            socAddress: uint8ArrayToHex(updateResult.socAddress),
+            encryptionKey: encryptionKey ? encryptionKey : undefined,
+            epoch: {
+              start: updateResult.epoch.start.toString(),
+              level: updateResult.epoch.level,
+            },
+            timestamp: updateResult.timestamp.toString(),
+          } satisfies IframeToParentMessage,
+          { targetOrigin: event.origin },
+        )
+      }
+
+      console.log("[Proxy] User epoch feed upload reference successful")
+    } catch (error) {
+      this.sendErrorToParent(
+        event,
+        requestId,
+        error instanceof Error
+          ? error.message
+          : "User epoch feed upload reference failed",
       )
     }
   }

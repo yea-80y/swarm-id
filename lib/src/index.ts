@@ -198,6 +198,9 @@ export type {
   EpochFeedDownloadReferenceMessage,
   EpochFeedUploadReferenceMessage,
   FeedGetOwnerMessage,
+  GetUserFeedSignerMessage,
+  GetUserFeedSignerResponseMessage,
+  UserEpochFeedUploadReferenceMessage,
   SequentialFeedGetOwnerMessage,
   SequentialFeedDownloadPayloadMessage,
   SequentialFeedDownloadRawPayloadMessage,
@@ -319,6 +322,20 @@ export { SWARM_SECRET_PREFIX } from "./types"
 
 // URL building utilities
 export { buildAuthUrl } from "./utils/url"
+
+// Encrypted upload utilities
+export {
+  uploadEncryptedDataWithSigning,
+  uploadEncryptedSOC,
+  uploadSOC,
+  uploadSOCViaSocEndpoint,
+} from "./proxy/upload-encrypted-data"
+
+export type {
+  UploadEncryptedDataResult,
+  UploadEncryptedSOCResult,
+  UploadSOCResult,
+} from "./proxy/upload-encrypted-data"
 
 // Manifest builder utilities for /bzz/ feed compatibility
 export {

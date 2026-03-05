@@ -25,6 +25,7 @@
 		SeedPhraseRequiredError,
 		getMasterKeyFromAgentAccount,
 	} from '$lib/utils/account-auth'
+	import { deriveFeedSigner } from '$lib/utils/feed-signer'
 	import Confirmation from '$lib/components/confirmation.svelte'
 	import EnterSeedModal from '$lib/components/enter-seed-modal.svelte'
 
@@ -148,7 +149,7 @@
 		}
 	}
 
-	function updateSelectedIdentity(appSecret: string) {
+	function updateSelectedIdentity(appSecret: string, feedSignerKey?: string) {
 		if (!selectedIdentity) {
 			return
 		}
@@ -172,6 +173,7 @@
 				appIcon: sessionStore.data.appData.appIcon,
 				appDescription: sessionStore.data.appData.appDescription,
 				appSecret,
+				feedSignerKey,
 			},
 			DEFAULT_SESSION_DURATION,
 		)
@@ -185,7 +187,7 @@
 				{
 					type: 'setSecret',
 					appOrigin: sessionStore.data.appOrigin,
-					data: { secret: appSecret },
+					data: { secret: appSecret, feedSignerKey },
 				},
 				window.location.origin, // same-origin only — cannot be spoofed
 			)
@@ -274,7 +276,17 @@
 			// Step 2: Derive app-specific secret from identity master key
 			const appSecret = await deriveSecret(identityMasterKey, sessionStore.data.appOrigin)
 
-			updateSelectedIdentity(appSecret)
+			// Derive user's BIP-44 feed signer from account master key.
+			// Account-level (not identity-level) — stable across identities.
+			let feedSignerKey: string | undefined
+			try {
+				const feedSigner = await deriveFeedSigner(account.type, masterKey)
+				feedSignerKey = feedSigner.privateKey.toHex()
+			} catch (err) {
+				console.warn('Feed signer derivation failed — user-owned feed writes unavailable', err)
+			}
+
+			updateSelectedIdentity(appSecret, feedSignerKey)
 
 			authenticated = true
 		} catch (err) {

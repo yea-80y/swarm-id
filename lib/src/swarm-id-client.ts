@@ -72,6 +72,9 @@ import type {
   AppMetadata,
   ButtonConfig,
   PostageBatch,
+  GetUserFeedSignerMessage,
+  GetUserFeedSignerResponseMessage,
+  UserEpochFeedUploadReferenceMessage,
 } from "./types"
 import {
   IframeToParentMessageSchema,
@@ -127,6 +130,7 @@ export class SwarmIdClient {
   private buttonConfig?: ButtonConfig
   private containerId?: string
   private ready: boolean = false
+  private feedSignerAddress: string | undefined // user's BIP-44 Swarm feed signer address
   private readyPromise: Promise<void>
   private readyResolve?: () => void
   private readyReject?: (error: Error) => void
@@ -424,6 +428,7 @@ export class SwarmIdClient {
         if (this.iframe) {
           this.iframe.style.display = "block"
         }
+        this.feedSignerAddress = message.feedSignerAddress
         if (this.onAuthChange) {
           this.onAuthChange(true)
         }
@@ -2104,6 +2109,227 @@ export class SwarmIdClient {
       uploadPayload,
       uploadRawReference,
       uploadRawPayload,
+    }
+  }
+
+  // ============================================================================
+  // Phase 3: User-owned feed operations
+  // ============================================================================
+
+  /**
+   * Returns the user's BIP-44 Swarm feed signer Ethereum address.
+   * This is the owner of all user-personal feeds (profile, ticket collection, etc.).
+   * Populated after successful authentication via the authSuccess message.
+   *
+   * @returns Ethereum address hex string (40 chars, no 0x prefix), or undefined if not authenticated
+   */
+  getUserFeedSignerAddress(): string | undefined {
+    return this.feedSignerAddress
+  }
+
+  /**
+   * Fetch the user's feed signer address from the proxy on demand.
+   * Use this when you need the address but authSuccess may not have fired yet
+   * (e.g. when the page loads with an existing session).
+   *
+   * @returns Ethereum address hex string, or undefined if not authenticated
+   */
+  async fetchUserFeedSignerAddress(): Promise<string | undefined> {
+    this.ensureReady()
+    const requestId = this.generateRequestId()
+    const response = await this.sendRequest<
+      GetUserFeedSignerResponseMessage,
+      GetUserFeedSignerMessage
+    >({
+      type: "getUserFeedSigner",
+      requestId,
+    })
+    this.feedSignerAddress = response.feedSignerAddress
+    return this.feedSignerAddress
+  }
+
+  /**
+   * Returns an epoch feed writer that signs with the user's BIP-44 feed signer.
+   * Use for user-owned personal feeds (profile, ticket collection) rather than
+   * app-specific feeds. The signing key never leaves the proxy iframe.
+   *
+   * The returned FeedWriter reads use the user's feed signer address as owner.
+   * Writes use the proxy's stored user feed signer key — no private key needed client-side.
+   *
+   * @param options - Feed writer options (topic required; signer is handled by proxy)
+   * @param requestOptions - Optional request configuration
+   * @returns FeedWriter with user-owned signing
+   */
+  makeUserEpochFeedWriter(
+    options: Omit<FeedWriterOptions, "signer">,
+    requestOptions?: RequestOptions,
+  ): FeedWriter {
+    this.ensureReady()
+    const topic = this.normalizeFeedTopic(options.topic)
+    let owner: string | undefined = this.feedSignerAddress
+
+    const resolveOwner = async (): Promise<string> => {
+      if (owner) return owner
+      const addr = await this.fetchUserFeedSignerAddress()
+      if (!addr) throw new Error("User feed signer not available")
+      owner = addr
+      return owner
+    }
+
+    const downloadReference = async (
+      dlOptions?: EpochFeedDownloadOptions,
+    ): Promise<EpochFeedDownloadReferenceResult> => {
+      const resolvedOwner = await resolveOwner()
+      const atValue =
+        dlOptions?.at !== undefined
+          ? dlOptions.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedDownloadReferenceResponseMessage,
+        EpochFeedDownloadReferenceMessage
+      >({
+        type: "epochFeedDownloadReference",
+        requestId,
+        topic,
+        owner: resolvedOwner,
+        at: this.normalizeFeedTimestamp(atValue),
+        after:
+          dlOptions?.after !== undefined
+            ? this.normalizeFeedTimestamp(dlOptions.after)
+            : undefined,
+        encryptionKey:
+          dlOptions?.encryptionKey !== undefined
+            ? this.normalizeSocKey(dlOptions.encryptionKey)
+            : undefined,
+        requestOptions,
+      })
+      const reference = response.reference
+      const cleanRef =
+        reference && reference.startsWith("0x") ? reference.slice(2) : reference
+      const encryptionKey =
+        cleanRef && cleanRef.length === 128 ? cleanRef.slice(64) : undefined
+      return { reference, encryptionKey }
+    }
+
+    const downloadPayload = async (
+      dlOptions?: EpochFeedDownloadOptions,
+    ): Promise<EpochFeedDownloadPayloadResult> => {
+      const result = await downloadReference(dlOptions)
+      if (!result.reference) {
+        return {
+          reference: undefined,
+          payload: undefined,
+          encryptionKey: undefined,
+        }
+      }
+      const payload = await this.downloadData(
+        result.reference,
+        undefined,
+        requestOptions,
+      )
+      return {
+        reference: result.reference,
+        payload,
+        encryptionKey: result.encryptionKey,
+      }
+    }
+
+    const uploadReference = async (
+      reference: Uint8Array | string,
+      ulOptions?: EpochFeedUploadOptions,
+    ): Promise<EpochFeedUploadResult> => {
+      const atValue =
+        ulOptions?.at !== undefined
+          ? ulOptions.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const normalizedRef = this.normalizeReference(reference)
+      const cleanRef = normalizedRef.startsWith("0x")
+        ? normalizedRef.slice(2)
+        : normalizedRef
+      const derivedKey =
+        cleanRef.length === 128 ? cleanRef.slice(64) : undefined
+      const feedKey = ulOptions?.encryptionKey ?? derivedKey
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedUploadReferenceResponseMessage,
+        UserEpochFeedUploadReferenceMessage
+      >({
+        type: "userEpochFeedUploadReference",
+        requestId,
+        topic,
+        at: this.normalizeFeedTimestamp(atValue),
+        reference: normalizedRef,
+        encryptionKey:
+          feedKey !== undefined ? this.normalizeSocKey(feedKey) : undefined,
+        hints: ulOptions?.hints,
+        requestOptions,
+      })
+      return {
+        socAddress: response.socAddress,
+        reference: normalizedRef,
+        encryptionKey: derivedKey,
+        epoch: response.epoch,
+        timestamp: response.timestamp,
+      }
+    }
+
+    const uploadPayload = async (
+      data: Uint8Array | string,
+      ulOptions?: EpochFeedUploadOptions,
+    ): Promise<EpochFeedUploadResult> => {
+      const atValue =
+        ulOptions?.at !== undefined
+          ? ulOptions.at
+          : BigInt(Math.floor(Date.now() / 1000))
+      const encrypt = ulOptions?.encrypt !== false
+      const uploadResult = await this.uploadData(
+        this.normalizePayload(data),
+        { ...ulOptions?.uploadOptions, encrypt },
+        requestOptions,
+      )
+      const cleanRef = uploadResult.reference.startsWith("0x")
+        ? uploadResult.reference.slice(2)
+        : uploadResult.reference
+      const derivedKey =
+        cleanRef.length === 128 ? cleanRef.slice(64) : undefined
+      const feedKey = ulOptions?.encryptionKey ?? derivedKey
+      const requestId = this.generateRequestId()
+      const response = await this.sendRequest<
+        EpochFeedUploadReferenceResponseMessage,
+        UserEpochFeedUploadReferenceMessage
+      >({
+        type: "userEpochFeedUploadReference",
+        requestId,
+        topic,
+        at: this.normalizeFeedTimestamp(atValue),
+        reference: uploadResult.reference,
+        encryptionKey:
+          feedKey !== undefined ? this.normalizeSocKey(feedKey) : undefined,
+        hints: ulOptions?.hints,
+        requestOptions,
+      })
+      return {
+        socAddress: response.socAddress,
+        reference: uploadResult.reference,
+        encryptionKey: derivedKey,
+        epoch: response.epoch,
+        timestamp: response.timestamp,
+      }
+    }
+
+    return {
+      getOwner: resolveOwner,
+      downloadReference,
+      downloadPayload,
+      // Raw variants not relevant for user feeds — delegate to standard reader
+      downloadRawReference: downloadReference,
+      downloadRawPayload: downloadPayload,
+      uploadReference,
+      uploadPayload,
+      // Raw upload variants not needed for user feeds
+      uploadRawReference: uploadReference,
+      uploadRawPayload: uploadPayload,
     }
   }
 

@@ -972,6 +972,26 @@ export const GetPostageBatchMessageSchema = z.object({
   requestId: z.string(),
 })
 
+// ============================================================================
+// Phase 3: User-owned feed operations (proxy uses user's BIP-44 feed signer)
+// ============================================================================
+
+export const GetUserFeedSignerMessageSchema = z.object({
+  type: z.literal("getUserFeedSigner"),
+  requestId: z.string(),
+})
+
+export const UserEpochFeedUploadReferenceMessageSchema = z.object({
+  type: z.literal("userEpochFeedUploadReference"),
+  requestId: z.string(),
+  topic: IdentifierSchema,
+  at: TimestampSchema,
+  reference: ReferenceSchema,
+  encryptionKey: PrivateKeySchema.optional(),
+  hints: EpochHintsSchema,
+  requestOptions: RequestOptionsSchema,
+})
+
 export const ParentToIframeMessageSchema = z.discriminatedUnion("type", [
   ParentIdentifyMessageSchema,
   CheckAuthMessageSchema,
@@ -1010,6 +1030,8 @@ export const ParentToIframeMessageSchema = z.discriminatedUnion("type", [
   ActRevokeGranteesMessageSchema,
   ActGetGranteesMessageSchema,
   GetPostageBatchMessageSchema,
+  GetUserFeedSignerMessageSchema,
+  UserEpochFeedUploadReferenceMessageSchema,
 ])
 
 export type ParentIdentifyMessage = z.infer<typeof ParentIdentifyMessageSchema>
@@ -1110,6 +1132,7 @@ export const DisconnectResponseMessageSchema = z.object({
 export const AuthSuccessMessageSchema = z.object({
   type: z.literal("authSuccess"),
   origin: z.string(),
+  feedSignerAddress: AddressSchema.optional(), // user's BIP-44 Swarm feed signer address (public info)
 })
 
 export const UploadDataResponseMessageSchema = z.object({
@@ -1400,6 +1423,12 @@ export const GetPostageBatchResponseMessageSchema = z.object({
   error: z.string().optional(),
 })
 
+export const GetUserFeedSignerResponseMessageSchema = z.object({
+  type: z.literal("getUserFeedSignerResponse"),
+  requestId: z.string(),
+  feedSignerAddress: AddressSchema.optional(),
+})
+
 export const IframeToParentMessageSchema = z.discriminatedUnion("type", [
   ProxyReadyMessageSchema,
   InitErrorMessageSchema,
@@ -1442,6 +1471,7 @@ export const IframeToParentMessageSchema = z.discriminatedUnion("type", [
   ActRevokeGranteesResponseMessageSchema,
   ActGetGranteesResponseMessageSchema,
   GetPostageBatchResponseMessageSchema,
+  GetUserFeedSignerResponseMessageSchema,
 ])
 
 export type ProxyReadyMessage = z.infer<typeof ProxyReadyMessageSchema>
@@ -1557,6 +1587,15 @@ export type ActGetGranteesResponseMessage = z.infer<
 export type GetPostageBatchResponseMessage = z.infer<
   typeof GetPostageBatchResponseMessageSchema
 >
+export type GetUserFeedSignerMessage = z.infer<
+  typeof GetUserFeedSignerMessageSchema
+>
+export type GetUserFeedSignerResponseMessage = z.infer<
+  typeof GetUserFeedSignerResponseMessageSchema
+>
+export type UserEpochFeedUploadReferenceMessage = z.infer<
+  typeof UserEpochFeedUploadReferenceMessageSchema
+>
 export type IframeToParentMessage = z.infer<typeof IframeToParentMessageSchema>
 
 // ============================================================================
@@ -1567,6 +1606,7 @@ export const AuthDataSchema = z.object({
   secret: z.string(),
   postageBatchId: BatchIdSchema.optional(),
   signerKey: PrivateKeySchema.optional(),
+  feedSignerKey: PrivateKeySchema.optional(), // BIP-44 user feed signer private key
   networkSettings: NetworkSettingsSchemaV1.optional(),
 })
 

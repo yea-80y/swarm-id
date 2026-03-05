@@ -66,6 +66,7 @@ export const PasskeyAccountSchemaV1 = z.object({
   credentialId: z.string(),
   swarmEncryptionKey: z.string().length(64), // NEW: derived encryption key for Swarm data (64-char hex)
   defaultPostageStampBatchID: StoredBatchId.optional(), // NEW: account default stamp
+  feedSignerAddress: z.string().length(40).optional(), // BIP-44 m/44'/60'/1'/0/0 derived address
 })
 
 /**
@@ -82,6 +83,7 @@ export const EthereumAccountSchemaV1 = z.object({
   encryptedSecretSeed: StoredBytes, // Encrypted secret seed for later retrieval
   swarmEncryptionKey: z.string().length(64), // NEW: derived encryption key for Swarm data (64-char hex)
   defaultPostageStampBatchID: StoredBatchId.optional(), // NEW: account default stamp
+  feedSignerAddress: z.string().length(40).optional(), // HKDF-derived feed signer address
 })
 
 /**
@@ -96,6 +98,7 @@ export const AgentAccountSchemaV1 = z.object({
   type: z.literal("agent"),
   swarmEncryptionKey: z.string().length(64), // derived encryption key for Swarm data (64-char hex)
   defaultPostageStampBatchID: StoredBatchId.optional(),
+  feedSignerAddress: z.string().length(40).optional(), // BIP-44 m/44'/60'/1'/0/0 derived address
 })
 
 /**
@@ -143,6 +146,7 @@ export const ConnectedAppSchemaV1 = z.object({
   appDescription: z.string().optional(),
   connectedUntil: z.number().optional(),
   appSecret: z.string().optional(),
+  feedSignerKey: z.string().length(64).optional(), // secp256k1 private key for user-owned Swarm feed writes
 })
 
 // ============================================================================
