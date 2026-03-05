@@ -110,6 +110,50 @@ after:  uploadEncryptedDataWithSigning(context, data, swarmEncryptionKey)  ← e
 
 ---
 
+### 5. User-Owned Feed Writes — BIP-44 Feed Signer (Phase 3)
+
+**Files:**
+- `lib/src/utils/feed-signer.ts` — `deriveBip44FeedSigner()` BIP-44 key derivation
+- `swarm-ui/src/lib/utils/feed-signer.ts` — same utility for the identity UI
+- `lib/src/swarm-id-client.ts` — `makeUserEpochFeedWriter()` and `getUserFeedSignerAddress()`
+- `lib/src/swarm-id-proxy.ts` — proxy holds feed signer, sends address to parent on auth
+- `lib/src/utils/storage-managers.ts` — `feedSignerKey` persisted in connected-apps
+
+The upstream architecture routes all Swarm writes through the identity service (or a platform server). This phase adds the infrastructure for users to own and sign their personal Swarm feeds directly, with no server in the loop.
+
+**Key derivation:**
+
+```
+masterKey (from passkey/web3/agent)
+  └─ BIP-44 m/44'/60'/1'/0/0  →  secp256k1 feed signer
+       ├─ privateKey (hex)   →  stored in connected-apps on identity service origin only
+       └─ address            →  sent to parent dApp via authSuccess postMessage
+```
+
+The derivation path `m/44'/60'/1'/0/0` is the cross-platform default Swarm feed signer. It's standard BIP-44 — compatible with MetaMask import, Ledger, and Trezor.
+
+**What the parent dApp gets:**
+
+```ts
+// After authentication:
+const address = client.getUserFeedSignerAddress()  // Ethereum address (public, safe to log)
+
+// Create a writer — signs chunks client-side without the server:
+const writer = client.makeUserEpochFeedWriter(topic)
+await writer.upload(stamp, data, { at: Date.now() })
+```
+
+The feed signer private key never leaves the identity service origin. The parent dApp gets a `feedSignerAddress` (to identify the feed) and a writer object (to sign chunks) — the signing happens inside the hidden iframe, which holds the key in memory after auth.
+
+**Storage design:** The `feedSignerKey` is stored in `swarm-id-connected-apps` on the identity service origin (same key as `appSecret`). The parent dApp's localStorage is untouched — it only ever sees the public address.
+
+**Auth paths:** All three proxy auth paths send `feedSignerAddress` in `authSuccess`:
+1. `loadAuthData()` — initial page load (restores from stored session)
+2. `authenticateFromStorage()` — storage event (Chrome/Firefox popup close)
+3. `handleSetSecretFromPopup()` — iOS Safari postMessage fallback
+
+---
+
 ## Build Setup
 
 ```bash
@@ -136,8 +180,8 @@ pnpm dev:swarm-ui   # http://localhost:5174
 | Phase | Status | Description |
 |---|---|---|
 | 1 — Fork fixes | ✅ Complete | PRF salt, iOS postMessage, BIP-39 backup, uploadFile encryption |
-| 2 — Feed signer backup | Planned | X25519 ECIES seals secp256k1 feed signer → Swarm recovery feed |
-| 3 — User-owned feed writes | Planned | Personal feeds signed client-side, bypasses server for user data |
+| 2 — Feed signer backup | ✅ Complete | X25519 ECIES recovery feed, BIP-39 covers passkey path, private key export |
+| 3 — User-owned feed writes | ✅ Complete | BIP-44 feed signer, client-side signing, feedSignerAddress to parent |
 | 4 — ENS sub-records | Planned | ENS text records as feed key recovery pointers |
 
 ---
