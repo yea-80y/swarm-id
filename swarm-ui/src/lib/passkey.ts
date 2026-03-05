@@ -35,10 +35,12 @@ function generateChallenge(): Uint8Array {
 	return challenge
 }
 
-// Fixed salt — domain-agnostic so the same passkey produces the same key
-// on any swarm-id-hosted surface (e.g. id.ethswarm.org, any sub-ENS, any gateway).
+// Fixed salt — describes purpose (HD wallet seed derivation), no brand/domain coupling.
+// Using a generic purpose string means the passkey identity is portable across any
+// service that adopts this standard, and the key material is entirely standard
+// (BIP-32/BIP-44/SLIP-0010 from the derived seed — no service owns the key hierarchy).
 // IMPORTANT: changing this value is a breaking change for all existing passkey accounts.
-const PRF_SALT_INPUT = 'swarm-id-ethereum-wallet-v1'
+const PRF_SALT_INPUT = 'hd-wallet-seed-v1'
 
 async function generatePRFSalt(): Promise<Uint8Array> {
 	const encoder = new TextEncoder()
