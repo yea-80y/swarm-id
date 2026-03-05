@@ -33,6 +33,10 @@
 		mnemonic = masterKeyToMnemonic(masterKey)
 	})
 
+	function handleSkip() {
+		goto(resolve(routes.IDENTITY_NEW))
+	}
+
 	async function handleConfirm() {
 		const masterKey = sessionStore.data.temporaryMasterKey
 		const account = sessionStore.data.account
@@ -69,15 +73,25 @@
 {#if mnemonic}
 	<CreationLayout
 		title="Save your recovery phrase"
-		description="Write down all 24 words in order — this is your only backup"
+		description="Optional — your passkey already works on any new device automatically"
 		onClose={() => goto(resolve(routes.HOME))}
 	>
 		{#snippet content()}
 			<Vertical --vertical-gap="var(--padding)">
 				<Typography>
-					Your recovery phrase lets you restore your passkey account on any device if you lose
-					access to this one. <strong>Store it somewhere safe and private.</strong> Never share it with
-					anyone.
+					<strong>You don't need this to use swarm-id on a new device.</strong> Your passkey syncs
+					automatically via Google Password Manager, iCloud Keychain, or your hardware key — just
+					sign in on the new device and everything works.
+					<br /><br />
+					This phrase has two uses. First, it's a last-resort recovery if you permanently lose your passkey
+					(all devices lost, cloud account deleted). Second, and importantly,
+					<strong
+						>it's the only way to hold your feed signer keys independently of Google, Apple, or your
+						hardware key.</strong
+					>
+					Without it, your ability to write to Swarm is tied entirely to your passkey provider. With it,
+					you can re-derive your keys anywhere using standard BIP-39 tools.
+					<strong>Never share these words with anyone.</strong>
 				</Typography>
 
 				<!-- 24-word grid -->
@@ -105,7 +119,7 @@
 				<!-- Confirmation checkbox -->
 				<Checkbox bind:checked={confirmed} dimension="compact">
 					<Typography variant="small"
-						>I have written down my 24-word recovery phrase and stored it safely.</Typography
+						>I understand this is optional backup only — my passkey already syncs across devices.</Typography
 					>
 				</Checkbox>
 
@@ -116,18 +130,29 @@
 		{/snippet}
 
 		{#snippet buttonContent()}
-			<Button
-				dimension="compact"
-				onclick={handleConfirm}
-				disabled={!confirmed || isStoring}
-				class="mobile-full-width"
-			>
-				<span class="desktop-only"><Checkmark size={20} /></span>
-				{isStoring ? 'Saving...' : "I've saved it — continue"}
-				<span class="mobile-only"
-					>{#if !isStoring}<ArrowRight size={20} />{/if}</span
+			<Vertical --vertical-gap="var(--half-padding)">
+				<Button
+					dimension="compact"
+					onclick={handleConfirm}
+					disabled={!confirmed || isStoring}
+					class="mobile-full-width"
 				>
-			</Button>
+					<span class="desktop-only"><Checkmark size={20} /></span>
+					{isStoring ? 'Saving...' : "I've saved it — continue"}
+					<span class="mobile-only"
+						>{#if !isStoring}<ArrowRight size={20} />{/if}</span
+					>
+				</Button>
+				<Button
+					dimension="compact"
+					variant="ghost"
+					onclick={handleSkip}
+					disabled={isStoring}
+					class="mobile-full-width"
+				>
+					Skip — my passkey syncs automatically
+				</Button>
+			</Vertical>
 		{/snippet}
 	</CreationLayout>
 {/if}
