@@ -181,6 +181,38 @@ export function deriveFeedRecoveryX25519(masterKey: Bytes): FeedRecoveryX25519 {
 }
 
 // ============================================================================
+// Identity-level feed signer (per-identity, all account types)
+// ============================================================================
+
+/** Domain separator for identity-level feed signer derivation */
+const IDENTITY_FEED_SIGNER_INFO_PREFIX = 'swarm-id/identity-feed-signer/v1:'
+
+/**
+ * Derive a feed signer scoped to a specific identity.
+ *
+ * Uses HKDF with the identity ID as part of the info string, producing a
+ * unique secp256k1 feed signer per identity. Works for all account types
+ * (passkey, ethereum, agent) — no index needed.
+ *
+ * The identity's feed signer address is safe to display (public info).
+ * The private key is only held in session / ConnectedApp storage.
+ *
+ * @param masterKey  - Account master key (32 bytes)
+ * @param identityId - Identity ID (Ethereum address string, e.g. "0xAbCd...")
+ */
+export function deriveIdentityFeedSigner(masterKey: Bytes, identityId: string): FeedSignerResult {
+	const info = IDENTITY_FEED_SIGNER_INFO_PREFIX + identityId.toLowerCase()
+	const derived = hkdf(sha256, masterKey.toUint8Array(), new Uint8Array(0), info, 32)
+	const signingKey = new SigningKey(derived)
+	const wallet = new BaseWallet(signingKey)
+
+	return {
+		privateKey: new Bytes(derived),
+		address: new EthAddress(wallet.address),
+	}
+}
+
+// ============================================================================
 // Unified entry point
 // ============================================================================
 

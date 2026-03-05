@@ -21,8 +21,8 @@
 	const identity = $derived(identityId ? identitiesStore.getIdentity(identityId) : undefined)
 	const account = $derived(identity ? accountsStore.getAccount(identity.accountId) : undefined)
 
-	// Feed signer address from account (stored at creation — no masterKey needed)
-	const feedSignerAddress = $derived(account?.feedSignerAddress)
+	// Feed signer address from identity (stored at creation — no masterKey needed)
+	const feedSignerAddress = $derived(identity?.feedSignerAddress)
 
 	// masterKey is available in session right after account creation or re-auth.
 	// If present, we can offer private key export.

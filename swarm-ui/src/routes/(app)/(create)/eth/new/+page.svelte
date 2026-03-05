@@ -31,7 +31,6 @@
 	import Confirmation from '$lib/components/confirmation.svelte'
 	import { onMount } from 'svelte'
 	import { deriveAccountSwarmEncryptionKey } from '@swarm-id/lib'
-	import { deriveFeedSigner } from '$lib/utils/feed-signer'
 	import type { AccountSyncType } from '$lib/types'
 
 	let showTypeTooltip = $state(false)
@@ -92,11 +91,6 @@
 			const swarmEncryptionKey = await deriveAccountSwarmEncryptionKey(masterKey.toHex())
 			console.log('🔑 SwarmEncryptionKey derived')
 
-			// Derive feed signer address (HKDF from masterKey for ethereum accounts).
-			// The address is safe to store; the private key stays in session only.
-			const feedSignerResult = await deriveFeedSigner('ethereum', masterKey)
-			console.log('🔑 Feed signer address derived:', feedSignerResult.address.toHex())
-
 			// Encrypt masterKey before storage
 			console.log('🔒 Encrypting masterKey...')
 
@@ -128,7 +122,6 @@
 				encryptionSalt: encryptionSalt,
 				encryptedSecretSeed: encryptedSecretSeed,
 				swarmEncryptionKey: swarmEncryptionKey,
-				feedSignerAddress: feedSignerResult.address.toHex(),
 			})
 			sessionStore.setAccount(newAccount)
 			sessionStore.setSyncedCreation(accountType === 'synced')

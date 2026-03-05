@@ -25,7 +25,7 @@
 		SeedPhraseRequiredError,
 		getMasterKeyFromAgentAccount,
 	} from '$lib/utils/account-auth'
-	import { deriveFeedSigner } from '$lib/utils/feed-signer'
+	import { deriveIdentityFeedSigner } from '$lib/utils/feed-signer'
 	import Confirmation from '$lib/components/confirmation.svelte'
 	import EnterSeedModal from '$lib/components/enter-seed-modal.svelte'
 
@@ -276,11 +276,10 @@
 			// Step 2: Derive app-specific secret from identity master key
 			const appSecret = await deriveSecret(identityMasterKey, sessionStore.data.appOrigin)
 
-			// Derive user's BIP-44 feed signer from account master key.
-			// Account-level (not identity-level) — stable across identities.
+			// Derive identity-level feed signer — unique per identity, all account types.
 			let feedSignerKey: string | undefined
 			try {
-				const feedSigner = await deriveFeedSigner(account.type, masterKey)
+				const feedSigner = deriveIdentityFeedSigner(masterKey, selectedIdentity.id)
 				feedSignerKey = feedSigner.privateKey.toHex()
 			} catch (err) {
 				console.warn(

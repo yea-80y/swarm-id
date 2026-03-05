@@ -22,6 +22,7 @@
 	import { toPrefixedHex } from '$lib/utils/hex'
 	import { generateDockerName } from '$lib/docker-name'
 	import Vertical from '$lib/components/ui/vertical.svelte'
+	import { deriveIdentityFeedSigner } from '$lib/utils/feed-signer'
 
 	type StampOption = 'account' | 'separate'
 
@@ -64,11 +65,14 @@
 		const name = generateDockerName(id)
 		const accountId = account.id
 		const createdAt = Date.now()
+		// Derive identity-level feed signer address (safe to store — public info)
+		const feedSigner = deriveIdentityFeedSigner(masterKey, id)
 		const identity: Identity = {
 			id,
 			accountId,
 			name,
 			createdAt,
+			feedSignerAddress: feedSigner.address.toHex(),
 		}
 		return identity
 	}

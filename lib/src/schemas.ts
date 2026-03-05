@@ -123,6 +123,7 @@ export const IdentitySchemaV1 = z.object({
   name: z.string(),
   defaultPostageStampBatchID: StoredBatchId.optional(),
   createdAt: z.number(),
+  feedSignerAddress: z.string().length(40).optional(), // identity-level Swarm feed signer address
   settings: z
     .object({
       appSessionDuration: z.number().optional(),
