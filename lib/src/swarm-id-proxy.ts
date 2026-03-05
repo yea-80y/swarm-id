@@ -4,6 +4,7 @@ import type {
   ButtonStyles,
   ButtonConfig,
   RequestAuthMessage,
+  PopupToIframeMessage,
   UploadDataMessage,
   DownloadDataMessage,
   UploadFileMessage,
@@ -42,7 +43,7 @@ import type {
   PostageBatch,
   ConnectedApp,
 } from "./types"
-import { ParentToIframeMessageSchema } from "./types"
+import { ParentToIframeMessageSchema, PopupToIframeMessageSchema } from "./types"
 import {
   Bee,
   makeContentAddressedChunk,
@@ -247,6 +248,61 @@ export class SwarmIdProxy {
   }
 
   /**
+   * Handle setSecret message from the auth popup (iOS Safari postMessage fallback).
+   * When Safari ITP prevents localStorage storage events from crossing popup→iframe,
+   * the popup sends the app secret directly via window.opener.postMessage().
+   * Only accepted from same origin (identity service) — cannot be spoofed.
+   */
+  private async handleSetSecretFromPopup(event: MessageEvent): Promise<void> {
+    let message: PopupToIframeMessage
+    try {
+      message = PopupToIframeMessageSchema.parse(event.data)
+    } catch (err) {
+      console.warn("[Proxy] Invalid setSecret message from popup:", err)
+      return
+    }
+
+    if (!this.parentOrigin) {
+      console.warn("[Proxy] setSecret received but parent origin not set yet")
+      return
+    }
+
+    // Verify the message's appOrigin matches the parent we're serving
+    if (message.appOrigin !== this.parentOrigin) {
+      console.warn(
+        "[Proxy] setSecret appOrigin mismatch — expected:",
+        this.parentOrigin,
+        "got:",
+        message.appOrigin,
+      )
+      return
+    }
+
+    console.log("[Proxy] Authenticating from popup postMessage (iOS Safari fallback)")
+
+    this.appSecret = message.data.secret
+    this.authenticated = true
+    this.authLoading = false
+    this.isConnecting = false
+
+    // On Safari, localStorage was already written by the popup before postMessage,
+    // so the stamp is available via lookupPostageStampForApp() from shared storage.
+    const stamp = this.lookupPostageStampForApp()
+    if (stamp) {
+      this.postageBatchId = stamp.batchID.toHex()
+      this.signerKey = stamp.signerKey.toHex()
+      this.stamperDepth = stamp.depth
+      await this.initializeStamper()
+    }
+
+    this.showAuthButton()
+    this.sendToParent({
+      type: "authSuccess",
+      origin: this.parentOrigin,
+    })
+  }
+
+  /**
    * Clean up resources when the proxy is destroyed.
    * Call this method when the proxy iframe is being unloaded.
    */
@@ -365,6 +421,15 @@ export class SwarmIdProxy {
       // Handle parent identification (must come first)
       if (type === "parentIdentify") {
         await this.handleParentIdentify(event)
+        return
+      }
+
+      // Handle setSecret from same-origin auth popup (iOS Safari postMessage fallback).
+      // Safari ITP partitions localStorage between popup and iframe, so storage events
+      // never fire. The popup sends the app secret directly via window.opener.postMessage().
+      // We accept this only from our own origin (same identity service).
+      if (type === "setSecret" && event.origin === window.location.origin) {
+        await this.handleSetSecretFromPopup(event)
         return
       }
 

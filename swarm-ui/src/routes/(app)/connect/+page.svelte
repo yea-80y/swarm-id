@@ -161,8 +161,9 @@
 			return
 		}
 
-		// Write to localStorage - this triggers storage events in the iframe
-		// which will detect the new connection and authenticate
+		// Write to localStorage - triggers storage events in the iframe on Chrome/Firefox.
+		// On Safari (ITP), the storage event never fires across popup→iframe; the
+		// window.opener.postMessage() below is the fallback for that case.
 		connectedAppsStore.addOrUpdateApp(
 			{
 				appUrl: sessionStore.data.appOrigin,
@@ -174,6 +175,21 @@
 			},
 			DEFAULT_SESSION_DURATION,
 		)
+
+		// iOS Safari postMessage fallback: if proxyMode=true in the hash, the popup
+		// was opened by the proxy iframe (same origin). Send the secret directly via
+		// window.opener.postMessage() so the proxy doesn't rely on the storage event.
+		const hashParams = getHashParams()
+		if (hashParams.get('proxyMode') === 'true' && window.opener) {
+			window.opener.postMessage(
+				{
+					type: 'setSecret',
+					appOrigin: sessionStore.data.appOrigin,
+					data: { secret: appSecret },
+				},
+				window.location.origin, // same-origin only — cannot be spoofed
+			)
+		}
 	}
 
 	async function tryGetMasterKeyFromAccount(account: Account) {

@@ -35,11 +35,14 @@ function generateChallenge(): Uint8Array {
 	return challenge
 }
 
+// Fixed salt — domain-agnostic so the same passkey produces the same key
+// on any swarm-id-hosted surface (e.g. id.ethswarm.org, any sub-ENS, any gateway).
+// IMPORTANT: changing this value is a breaking change for all existing passkey accounts.
+const PRF_SALT_INPUT = 'swarm-id-ethereum-wallet-v1'
+
 async function generatePRFSalt(): Promise<Uint8Array> {
-	// Domain-specific salt prevents cross-domain key derivation
-	const saltString = `${window.location.hostname}:ethereum-wallet-v1`
 	const encoder = new TextEncoder()
-	const saltBytes = encoder.encode(saltString)
+	const saltBytes = encoder.encode(PRF_SALT_INPUT)
 	const digest = await crypto.subtle.digest('SHA-256', saltBytes)
 	return new Uint8Array(digest)
 }
