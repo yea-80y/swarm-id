@@ -153,7 +153,7 @@
 						<CopyButton text={identity.id} />
 					{/if}
 				</Horizontal>
-				<Typography variant="small">Used to buy and own stamps</Typography>
+				<Typography variant="small">Unique identifier for this identity</Typography>
 			</Vertical>
 		</ResponsiveLayout>
 	</Vertical>
