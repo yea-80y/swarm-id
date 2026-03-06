@@ -179,10 +179,12 @@ pnpm dev:swarm-ui   # http://localhost:5174
 
 | Phase | Status | Description |
 |---|---|---|
-| 1 — Fork fixes | ✅ Complete | PRF salt, iOS postMessage, BIP-39 backup, uploadFile encryption |
-| 2 — Feed signer backup | 🔶 Partial | Crypto code done (ECIES, feed-recovery.ts, key export). UI not wired yet. |
-| 3 — User-owned feed writes | ✅ Complete | BIP-44 feed signer, client-side signing, feedSignerAddress to parent |
-| 4 — ENS sub-records | Planned | ENS text records as feed key recovery pointers |
+| 1 — Fork fixes + recovery | ✅ Complete | PRF salt, iOS postMessage, BIP-39 mnemonic, uploadFile encryption, ETH/passkey/backup recovery UIs, sign-in page |
+| 2 — Identity-level feed signers | ✅ Complete | Per-identity BIP-44 feed signer (consistent address across apps), key export, identity-level feed addresses |
+| 3 — User-owned feed writes | ✅ Complete | makeUserEpochFeedWriter(), identity feed signer stays in proxy (never sent to parent), BIP-44 derived |
+| 4 — Swarm account backup | ✅ Complete | ECIES backup encryption, backup creation UI, backup restore UI for all 3 account types |
+| 5 — Feed activity log + discovery | Planned | Opt-in feed write logging, platform registry mapping address → backup hash |
+| 6 — ENS + multi-owner chunks | Planned | ENS text records as recovery pointers, shared feeds |
 
 ---
 
