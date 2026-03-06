@@ -1,39 +1,28 @@
 /**
- * Account backup — write and read to/from Swarm SOC
+ * Account backup — write and read to/from Swarm
  *
- * Stores the full account state (masterKey for web3/Para + metadata for all)
- * as an ECIES-encrypted payload in a Swarm Single Owner Chunk (SOC).
+ * Stores the full account state as an ECIES-encrypted blob uploaded as a
+ * plain content-addressed chunk (bee.uploadData). No SOC signer needed —
+ * security comes entirely from the X25519 ECIES encryption, not from chunk
+ * ownership. The returned Swarm hash is logged and stored externally.
  *
- * SOC structure:
- *   owner   = user's derived secp256k1 key (from deriveBackupSigner in backup-encryption.ts)
- *   topic   = keccak256(userEthAddress + "swarm-id/backup/v1")  [32 bytes]
- *   content = JSON(SealedBox) where SealedBox = ECIES_encrypt(X25519, BackupPayload)
+ * Flow:
+ *   deriveBackupKeypair(entropy) → X25519 keypair
+ *   → ECIES encrypt payload → bee.uploadData() → hash
+ *   → log hash (show to user / store in platform registry)
  *
- * Why SOC not CAC: SOC address is deterministic from (owner, topic) — findable from
- * the user's ETH address alone, no hash storage needed. CAC requires storing the hash.
+ * Recovery:
+ *   have hash + entropy → re-derive X25519 → fetch hash → decrypt
  *
- * Discovery on restore:
- *   connect wallet/passkey → derive entropy (masterKey or podSeed)
- *   → deriveBackupSigner(entropy).publicKey().address() = ownerAddress
- *   → compute topic → compute SOC address (owner + topic → deterministic)
- *   → fetch from any Swarm gateway → decrypt
- *
- * Batch: platform batch (short-term). UI slot for user-owned batch in a later phase.
+ * Hash storage (short-term): shown to user + platform discovery registry feed.
+ * Hash storage (medium-term): sub-ENS text record.
  */
 
-import { Bee, PrivateKey } from '@ethersphere/bee-js'
-import type { EthAddress, BatchId } from '@ethersphere/bee-js'
-import { keccak256, toUtf8Bytes } from 'ethers'
+import { Bee } from '@ethersphere/bee-js'
+import type { BatchId } from '@ethersphere/bee-js'
 import { sealJson, openJson } from './ecies'
 import type { SealedBox } from './ecies'
 import type { BackupKeypair } from './backup-encryption'
-
-// ============================================================================
-// Constants
-// ============================================================================
-
-const BACKUP_TOPIC_SUFFIX = 'swarm-id/backup/v1'
-const BACKUP_PAYLOAD_VERSION = 1
 
 // ============================================================================
 // Types
@@ -59,7 +48,7 @@ export interface BackupConnectedApp {
 export interface BackupPayload {
 	version: number
 	timestamp: number
-	/** Only present for web3/Para accounts — passkey users omit (passkey re-derives) */
+	/** Only present for web3/Para accounts — passkey re-derives from PRF */
 	masterKeyHex?: string
 	identities: BackupIdentity[]
 	connectedApps: BackupConnectedApp[]
@@ -67,23 +56,8 @@ export interface BackupPayload {
 }
 
 export interface BackupWriteResult {
-	/** Hex SOC address on Swarm — informational only, not needed for recovery */
-	socAddress: string
-}
-
-// ============================================================================
-// Topic derivation
-// ============================================================================
-
-/**
- * Derives the 32-byte SOC topic for a given user ETH address.
- * Deterministic: same address + same suffix → same topic always.
- */
-function deriveBackupTopic(userEthAddress: EthAddress): Uint8Array {
-	const input = userEthAddress.toHex().toLowerCase() + ':' + BACKUP_TOPIC_SUFFIX
-	const hash = keccak256(toUtf8Bytes(input))
-	// keccak256 returns 0x-prefixed 32-byte hex → convert to bytes
-	return hexToBytes(hash.slice(2))
+	/** Swarm content-addressed hash (64-char hex) — log this for retrieval */
+	reference: string
 }
 
 // ============================================================================
@@ -91,43 +65,32 @@ function deriveBackupTopic(userEthAddress: EthAddress): Uint8Array {
 // ============================================================================
 
 /**
- * Encrypt and write the account backup to Swarm as a platform-signed SOC.
+ * Encrypt and upload the account backup to Swarm.
  *
- * Call this from the settings page after the user has opted in to backup.
- * Requires: masterKey in session (for web3/Para, to include in payload),
- *           a platform signing key (from env/config), and a valid stamper.
+ * The chunk is content-addressed — no signer needed. The returned hash is
+ * the only way to retrieve the backup; log it or store it in a registry feed.
  *
- * @param bee              Bee client
- * @param stamper          Postage stamper (platform batch, short-term)
- * @param platformKey      Platform secp256k1 key — SOC owner/signer
- * @param userEthAddress   User's root ETH address (derives topic)
- * @param payload          Full account state to back up
- * @param keypair          X25519 keypair for encryption (from backup-encryption.ts)
+ * @param bee      Bee client
+ * @param stamp    Postage stamp batch ID
+ * @param payload  Full account state to back up
+ * @param keypair  X25519 keypair for encryption (from deriveBackupKeypair)
  */
 export async function writeAccountBackup(
 	bee: Bee,
 	stamp: BatchId | string,
-	backupSignerKey: PrivateKey,
-	userEthAddress: EthAddress,
 	payload: BackupPayload,
 	keypair: BackupKeypair,
 ): Promise<BackupWriteResult> {
-	const topic = deriveBackupTopic(userEthAddress)
-
-	// ECIES-encrypt the payload to the user's X25519 public key
 	const sealedBox: SealedBox = await sealJson(keypair.publicKey, {
 		...payload,
-		version: BACKUP_PAYLOAD_VERSION,
+		version: 1,
 		timestamp: Date.now(),
 	})
 
-	const content = new TextEncoder().encode(JSON.stringify(sealedBox))
+	const data = new TextEncoder().encode(JSON.stringify(sealedBox))
+	const result = await bee.uploadData(stamp, data)
 
-	// User signs their own SOC. Platform only signs discovery registry feed (separate).
-	const socWriter = bee.makeSOCWriter(backupSignerKey)
-	const result = await socWriter.upload(stamp, topic, content)
-
-	return { socAddress: result.toString() }
+	return { reference: result.reference.toString() }
 }
 
 // ============================================================================
@@ -137,64 +100,35 @@ export async function writeAccountBackup(
 /**
  * Fetch and decrypt the account backup from Swarm.
  *
- * Returns undefined if no backup exists or if decryption fails.
- * Call this on first load when localStorage is empty (new device detection).
+ * Returns undefined if the hash is not found or decryption fails.
  *
- * @param bee            Bee client
- * @param ownerAddress   SOC owner address = deriveBackupSigner(entropy).publicKey().address()
- * @param userEthAddress User's root ETH address (derives topic)
- * @param keypair        X25519 keypair for decryption (same derivation as write)
+ * @param bee      Bee client
+ * @param reference  Swarm hash returned by writeAccountBackup
+ * @param keypair  X25519 keypair for decryption (same derivation as write)
  */
 export async function readAccountBackup(
 	bee: Bee,
-	ownerAddress: EthAddress,
-	userEthAddress: EthAddress,
+	reference: string,
 	keypair: BackupKeypair,
 ): Promise<BackupPayload | undefined> {
 	try {
-		const topic = deriveBackupTopic(userEthAddress)
-
-		const socReader = bee.makeSOCReader(ownerAddress)
-		const soc = await socReader.download(topic)
-		const content = soc.payload.toUint8Array()
-
-		const sealedBox = JSON.parse(new TextDecoder().decode(content)) as SealedBox
+		const data = await bee.downloadData(reference)
+		const sealedBox = JSON.parse(new TextDecoder().decode(data.toUint8Array())) as SealedBox
 		return await openJson<BackupPayload>(keypair.privateKey, sealedBox)
 	} catch {
-		// No backup found or decryption failed — not an error for the caller
 		return undefined
 	}
 }
 
 /**
- * Check whether a backup SOC exists for the given user address.
- * Does not decrypt — just checks presence. Useful for showing "Restore" option.
- *
- * @param ownerAddress  = deriveBackupSigner(entropy).publicKey().address()
+ * Check whether a backup exists at the given Swarm hash.
+ * Does not decrypt — just checks presence.
  */
-export async function backupExists(
-	bee: Bee,
-	ownerAddress: EthAddress,
-	userEthAddress: EthAddress,
-): Promise<boolean> {
+export async function backupExists(bee: Bee, reference: string): Promise<boolean> {
 	try {
-		const topic = deriveBackupTopic(userEthAddress)
-		const socReader = bee.makeSOCReader(ownerAddress)
-		await socReader.download(topic)
+		await bee.downloadData(reference)
 		return true
 	} catch {
 		return false
 	}
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-function hexToBytes(hex: string): Uint8Array {
-	const bytes = new Uint8Array(hex.length / 2)
-	for (let i = 0; i < bytes.length; i++) {
-		bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-	}
-	return bytes
 }
