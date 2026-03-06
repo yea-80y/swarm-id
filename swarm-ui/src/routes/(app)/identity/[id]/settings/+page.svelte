@@ -14,6 +14,7 @@
 	import { connectedAppsStore } from '$lib/stores/connected-apps.svelte'
 	import { postageStampsStore } from '$lib/stores/postage-stamps.svelte'
 	import { networkSettingsStore } from '$lib/stores/network-settings.svelte'
+	import ErrorMessage from '$lib/components/ui/error-message.svelte'
 	import Hashicon from '$lib/components/hashicon.svelte'
 	import CopyButton from '$lib/components/copy-button.svelte'
 	import Divider from '$lib/components/ui/divider.svelte'
@@ -37,10 +38,9 @@
 	// If present, we can offer private key export and backup.
 	const masterKey = $derived(sessionStore.data.temporaryMasterKey)
 
-	// First postage stamp for this account — used as backup upload stamp
-	const accountStamp = $derived(
-		account ? postageStampsStore.getStampsByAccount(account.id.toHex())[0] : undefined,
-	)
+	// Batch ID entered by user for backup upload — just the 64-char hex, no signer needed
+	let backupBatchId = $state('')
+	const backupBatchIdValid = $derived(/^[0-9a-fA-F]{64}$/.test(backupBatchId))
 
 	let identityName = $state('')
 
@@ -109,7 +109,7 @@
 
 	/** Encrypt and upload account backup to Swarm, log the returned hash. */
 	async function handleBackup() {
-		if (!account || !masterKey || !accountStamp) return
+		if (!account || !masterKey || !backupBatchIdValid) return
 
 		try {
 			isBackingUp = true
@@ -118,7 +118,6 @@
 			const entropy = masterKey.toUint8Array()
 			const keypair = deriveBackupKeypair(entropy)
 
-			// Build payload from current account state
 			const accountIdentities = identitiesStore.identities.filter((i) =>
 				i.accountId.equals(account.id),
 			)
@@ -130,7 +129,6 @@
 			const payload: BackupPayload = {
 				version: 1,
 				timestamp: Date.now(),
-				// Include masterKey for web3/Para — passkey re-derives from PRF
 				masterKeyHex: account.type !== 'passkey' ? masterKey.toHex() : undefined,
 				identities: accountIdentities.map((i) => ({
 					id: i.id,
@@ -153,7 +151,7 @@
 			}
 
 			const bee = new Bee(networkSettingsStore.beeNodeUrl)
-			const result = await writeAccountBackup(bee, accountStamp.batchID.toHex(), payload, keypair)
+			const result = await writeAccountBackup(bee, backupBatchId, payload, keypair)
 
 			backupReference = result.reference
 			backupTimestamp = Date.now()
@@ -455,12 +453,25 @@
 			<Typography variant="small" style="color: var(--colors-medium)">
 				Backup is available immediately after account creation or re-authentication.
 			</Typography>
-		{:else if !accountStamp}
-			<Typography variant="small" style="color: var(--colors-warning, #f59e0b)">
-				No postage stamp found for this account. Add a stamp to enable backup.
-			</Typography>
 		{:else}
-			<!-- Stamp available + masterKey in session — can back up -->
+			<!-- Batch ID input — no signer key needed, plain upload only needs the batch ID -->
+			<ResponsiveLayout
+				--responsive-align-items="start"
+				--responsive-justify-content="stretch"
+				--responsive-gap="var(--quarter-padding)"
+			>
+				<Typography class={!layoutStore.mobile ? 'flex50 input-layout' : ''}
+					>Postage batch ID</Typography
+				>
+				<Input
+					variant="outline"
+					dimension="compact"
+					name="backup-batch-id"
+					placeholder="64-char hex batch ID"
+					bind:value={backupBatchId}
+					class={!layoutStore.mobile ? 'flex50' : ''}
+				/>
+			</ResponsiveLayout>
 
 			{#if backupReference}
 				<!-- Previous backup hash -->
@@ -499,16 +510,14 @@
 					variant={backupReference ? 'ghost' : 'strong'}
 					dimension="compact"
 					onclick={handleBackup}
-					disabled={isBackingUp}
+					disabled={isBackingUp || !backupBatchIdValid}
 				>
 					{isBackingUp ? 'Backing up…' : backupReference ? 'Back up again' : 'Back up now'}
 				</Button>
 			</Horizontal>
 
 			{#if backupError}
-				<Typography variant="small" style="color: var(--colors-danger, #ef4444)">
-					{backupError}
-				</Typography>
+				<ErrorMessage>{backupError}</ErrorMessage>
 			{/if}
 		{/if}
 	</Vertical>
