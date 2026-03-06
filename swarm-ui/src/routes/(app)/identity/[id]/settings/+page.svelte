@@ -1,7 +1,4 @@
 <script lang="ts">
-	import { browser } from '$app/environment'
-	import { Bee } from '@ethersphere/bee-js'
-	import { onMount } from 'svelte'
 	import Vertical from '$lib/components/ui/vertical.svelte'
 	import Typography from '$lib/components/ui/typography.svelte'
 	import ResponsiveLayout from '$lib/components/ui/responsive-layout.svelte'
@@ -11,21 +8,15 @@
 	import Input from '$lib/components/ui/input/input.svelte'
 	import { page } from '$app/state'
 	import { identitiesStore } from '$lib/stores/identities.svelte'
-	import { connectedAppsStore } from '$lib/stores/connected-apps.svelte'
-	import { postageStampsStore } from '$lib/stores/postage-stamps.svelte'
-	import { networkSettingsStore } from '$lib/stores/network-settings.svelte'
-	import ErrorMessage from '$lib/components/ui/error-message.svelte'
 	import Hashicon from '$lib/components/hashicon.svelte'
 	import CopyButton from '$lib/components/copy-button.svelte'
 	import Divider from '$lib/components/ui/divider.svelte'
 	import CreateIdentityButton from '$lib/components/create-identity-button.svelte'
 	import Button from '$lib/components/ui/button.svelte'
 	import { sessionStore } from '$lib/stores/session.svelte'
+	import { getMasterKeyFromAccount, SeedPhraseRequiredError } from '$lib/utils/account-auth'
 	import { deriveExportedKeys, toMetaMaskHex } from '$lib/utils/key-export'
 	import type { ExportedKeys } from '$lib/utils/key-export'
-	import { deriveBackupKeypair } from '$lib/utils/backup-encryption'
-	import { writeAccountBackup } from '$lib/utils/account-backup'
-	import type { BackupPayload } from '$lib/utils/account-backup'
 
 	const identityId = $derived(page.params.id)
 	const identity = $derived(identityId ? identitiesStore.getIdentity(identityId) : undefined)
@@ -35,12 +26,8 @@
 	const feedSignerAddress = $derived(identity?.feedSignerAddress)
 
 	// masterKey is available in session right after account creation or re-auth.
-	// If present, we can offer private key export and backup.
+	// If present, we can offer private key export.
 	const masterKey = $derived(sessionStore.data.temporaryMasterKey)
-
-	// Batch ID entered by user for backup upload — just the 64-char hex, no signer needed
-	let backupBatchId = $state('')
-	const backupBatchIdValid = $derived(/^[0-9a-fA-F]{64}$/.test(backupBatchId))
 
 	let identityName = $state('')
 
@@ -48,24 +35,6 @@
 	let exportedKeys = $state<ExportedKeys | undefined>(undefined)
 	let exportError = $state<string | undefined>(undefined)
 	let isExporting = $state(false)
-
-	// Backup state
-	let backupReference = $state<string | undefined>(undefined)
-	let backupTimestamp = $state<number | undefined>(undefined)
-	let isBackingUp = $state(false)
-	let backupError = $state<string | undefined>(undefined)
-
-	const BACKUP_REF_KEY = $derived(account ? `swarm-id-backup-${account.id.toHex()}` : '')
-
-	onMount(() => {
-		if (!browser) return
-		const stored = localStorage.getItem(BACKUP_REF_KEY)
-		if (stored) {
-			const parsed = JSON.parse(stored) as { reference: string; timestamp: number }
-			backupReference = parsed.reference
-			backupTimestamp = parsed.timestamp
-		}
-	})
 
 	$effect(() => {
 		if (identity) {
@@ -82,19 +51,30 @@
 	}
 
 	/**
-	 * Derive and reveal all exportable keys from the account master key.
-	 * Requires masterKey to be present in session (available after account
-	 * creation or explicit re-authentication).
+	 * Derive and reveal all exportable keys.
+	 * If masterKey is in session, use it directly.
+	 * Otherwise, re-authenticate (passkey prompt / wallet sign) to get it.
 	 */
 	async function handleExportKeys() {
-		if (!account || !masterKey) return
+		if (!account) return
 
 		try {
 			isExporting = true
 			exportError = undefined
-			exportedKeys = await deriveExportedKeys(account, masterKey)
+
+			let key = masterKey
+			if (!key) {
+				key = await getMasterKeyFromAccount(account)
+				sessionStore.setTemporaryMasterKey(key)
+			}
+
+			exportedKeys = await deriveExportedKeys(account, key)
 		} catch (err) {
-			exportError = err instanceof Error ? err.message : 'Failed to derive keys'
+			if (err instanceof SeedPhraseRequiredError) {
+				exportError = 'Agent accounts require seed phrase — use recovery page.'
+			} else {
+				exportError = err instanceof Error ? err.message : 'Failed to derive keys'
+			}
 			console.error('[Settings] Key export failed:', err)
 		} finally {
 			isExporting = false
@@ -105,66 +85,6 @@
 	function handleHideKeys() {
 		exportedKeys = undefined
 		exportError = undefined
-	}
-
-	/** Encrypt and upload account backup to Swarm, log the returned hash. */
-	async function handleBackup() {
-		if (!account || !masterKey || !backupBatchIdValid) return
-
-		try {
-			isBackingUp = true
-			backupError = undefined
-
-			const entropy = masterKey.toUint8Array()
-			const keypair = deriveBackupKeypair(entropy)
-
-			const accountIdentities = identitiesStore.identities.filter((i) =>
-				i.accountId.equals(account.id),
-			)
-			const accountApps = accountIdentities.flatMap((i) =>
-				connectedAppsStore.getAppsByIdentityId(i.id),
-			)
-			const accountStamps = postageStampsStore.getStampsByAccount(account.id.toHex())
-
-			const payload: BackupPayload = {
-				version: 1,
-				timestamp: Date.now(),
-				masterKeyHex: account.type !== 'passkey' ? masterKey.toHex() : undefined,
-				identities: accountIdentities.map((i) => ({
-					id: i.id,
-					accountId: i.accountId.toHex(),
-					name: i.name,
-					createdAt: i.createdAt,
-					feedSignerAddress: i.feedSignerAddress,
-					defaultPostageStampBatchID: i.defaultPostageStampBatchID?.toHex(),
-				})),
-				connectedApps: accountApps.map((a) => ({
-					appUrl: a.appUrl,
-					appName: a.appName,
-					identityId: a.identityId,
-					appSecret: a.appSecret ?? '',
-					connectedUntil: a.connectedUntil ?? 0,
-				})),
-				postageStamps: accountStamps.map((s) => ({
-					batchId: s.batchID.toHex(),
-				})),
-			}
-
-			const bee = new Bee(networkSettingsStore.beeNodeUrl)
-			const result = await writeAccountBackup(bee, backupBatchId, payload, keypair)
-
-			backupReference = result.reference
-			backupTimestamp = Date.now()
-			localStorage.setItem(
-				BACKUP_REF_KEY,
-				JSON.stringify({ reference: backupReference, timestamp: backupTimestamp }),
-			)
-		} catch (err) {
-			backupError = err instanceof Error ? err.message : 'Backup failed. Try again.'
-			console.error('[Backup] Failed:', err)
-		} finally {
-			isBackingUp = false
-		}
 	}
 </script>
 
@@ -310,183 +230,73 @@
 			</ResponsiveLayout>
 		{/if}
 
-		<!-- Export private keys — only available when masterKey is in session -->
-		{#if masterKey}
-			{#if !exportedKeys}
-				<Horizontal --horizontal-gap="var(--half-padding)">
-					<Button
-						variant="ghost"
-						dimension="compact"
-						onclick={handleExportKeys}
-						disabled={isExporting}
-					>
-						{isExporting ? 'Deriving keys…' : 'Show private keys'}
-					</Button>
-				</Horizontal>
-				{#if exportError}
-					<Typography variant="small" style="color: var(--color-danger)">{exportError}</Typography>
-				{/if}
-			{:else}
-				<!-- Exported key display -->
-				<Vertical
-					--vertical-gap="var(--padding)"
-					class="key-export-panel"
-					style="padding: var(--padding); border: 1px solid var(--color-border); border-radius: var(--border-radius);"
-				>
-					<Typography variant="small" style="color: var(--color-warning)">
-						Keep these keys secret. Anyone with access can write to your Swarm feeds and spend your
-						funds.
-					</Typography>
-
-					<!-- Feed signer private key -->
-					<ResponsiveLayout
-						--responsive-align-items="start"
-						--responsive-justify-content="stretch"
-						--responsive-gap="var(--quarter-padding)"
-					>
-						<Typography class={!layoutStore.mobile ? 'flex50 input-layout' : ''}
-							>Feed signer private key</Typography
-						>
-						<Horizontal
-							class={!layoutStore.mobile ? 'flex50' : ''}
-							--horizontal-gap="var(--half-padding)"
-						>
-							<Input
-								variant="outline"
-								dimension="compact"
-								name="feed-signer-key"
-								value={toMetaMaskHex(exportedKeys.feedSignerHex)}
-								class="grower key-input"
-								disabled
-							/>
-							<CopyButton text={toMetaMaskHex(exportedKeys.feedSignerHex)} />
-						</Horizontal>
-					</ResponsiveLayout>
-
-					<!-- Parent / funds account key -->
-					<ResponsiveLayout
-						--responsive-align-items="start"
-						--responsive-justify-content="stretch"
-						--responsive-gap="var(--quarter-padding)"
-					>
-						<Vertical class={!layoutStore.mobile ? 'flex50 input-layout' : ''}>
-							<Typography>Parent account key</Typography>
-							<Typography variant="small" style="color: var(--color-text-secondary)">
-								{#if account?.type === 'passkey' || account?.type === 'agent'}
-									m/44'/60'/0'/0/0 — import into MetaMask as funds wallet
-								{:else}
-									Your SIWE-derived master key
-								{/if}
-							</Typography>
-						</Vertical>
-						<Horizontal
-							class={!layoutStore.mobile ? 'flex50' : ''}
-							--horizontal-gap="var(--half-padding)"
-						>
-							<Input
-								variant="outline"
-								dimension="compact"
-								name="parent-key"
-								value={toMetaMaskHex(exportedKeys.parentKeyHex)}
-								class="grower key-input"
-								disabled
-							/>
-							<CopyButton text={toMetaMaskHex(exportedKeys.parentKeyHex)} />
-						</Horizontal>
-					</ResponsiveLayout>
-
-					<!-- BIP-39 mnemonic (passkey/agent only) -->
-					{#if exportedKeys.mnemonic}
-						<ResponsiveLayout
-							--responsive-align-items="start"
-							--responsive-justify-content="stretch"
-							--responsive-gap="var(--quarter-padding)"
-						>
-							<Vertical class={!layoutStore.mobile ? 'flex50 input-layout' : ''}>
-								<Typography>Recovery phrase</Typography>
-								<Typography variant="small" style="color: var(--color-text-secondary)">
-									24-word BIP-39 phrase — recovers all keys including feed signer
-								</Typography>
-							</Vertical>
-							<Vertical
-								class={!layoutStore.mobile ? 'flex50' : ''}
-								--vertical-gap="var(--quarter-gap)"
-							>
-								<div class="mnemonic-grid">
-									{#each exportedKeys.mnemonic.split(' ') as word, i (i)}
-										<span class="mnemonic-word"
-											><span class="mnemonic-n">{i + 1}.</span> {word}</span
-										>
-									{/each}
-								</div>
-								<CopyButton text={exportedKeys.mnemonic} />
-							</Vertical>
-						</ResponsiveLayout>
-					{/if}
-
-					<Button variant="ghost" dimension="compact" onclick={handleHideKeys}>Hide keys</Button>
-				</Vertical>
-			{/if}
-		{:else}
-			<!-- masterKey not in session — inform user how to access export -->
-			<Typography variant="small" style="color: var(--color-text-secondary)">
-				Private key export is available immediately after account creation or after
-				re-authentication.
-			</Typography>
-		{/if}
-	</Vertical>
-
-	<Divider --margin="0" />
-
-	<!-- ===== Swarm Backup ===== -->
-	<Vertical --vertical-gap="var(--padding)">
-		<Typography variant="h5">Swarm Backup</Typography>
-		<Typography variant="small">
-			Encrypts your identities, connected apps, and stamps and uploads them to Swarm. Only you can
-			decrypt the backup — it is encrypted with a key only you can derive.
-			{#if account?.type !== 'passkey'}
-				Your master key is included so you can restore on a new device without your passphrase.
-			{/if}
-		</Typography>
-
-		{#if !masterKey}
-			<Typography variant="small" style="color: var(--colors-medium)">
-				Backup is available immediately after account creation or re-authentication.
-			</Typography>
-		{:else}
-			<!-- Batch ID input — no signer key needed, plain upload only needs the batch ID -->
-			<ResponsiveLayout
-				--responsive-align-items="start"
-				--responsive-justify-content="stretch"
-				--responsive-gap="var(--quarter-padding)"
-			>
-				<Typography class={!layoutStore.mobile ? 'flex50 input-layout' : ''}
-					>Postage batch ID</Typography
-				>
-				<Input
-					variant="outline"
+		<!-- Export private keys — re-authenticates if masterKey not in session -->
+		{#if !exportedKeys}
+			<Horizontal --horizontal-gap="var(--half-padding)">
+				<Button
+					variant="ghost"
 					dimension="compact"
-					name="backup-batch-id"
-					placeholder="64-char hex batch ID"
-					bind:value={backupBatchId}
-					class={!layoutStore.mobile ? 'flex50' : ''}
-				/>
-			</ResponsiveLayout>
+					onclick={handleExportKeys}
+					disabled={isExporting}
+				>
+					{isExporting ? 'Authenticating…' : 'Show private keys'}
+				</Button>
+			</Horizontal>
+			{#if exportError}
+				<Typography variant="small" style="color: var(--color-danger)">{exportError}</Typography>
+			{/if}
+		{:else}
+			<!-- Exported key display -->
+			<Vertical
+				--vertical-gap="var(--padding)"
+				class="key-export-panel"
+				style="padding: var(--padding); border: 1px solid var(--color-border); border-radius: var(--border-radius);"
+			>
+				<Typography variant="small" style="color: var(--color-warning)">
+					Keep these keys secret. Anyone with access can write to your Swarm feeds and spend your
+					funds.
+				</Typography>
 
-			{#if backupReference}
-				<!-- Previous backup hash -->
+				<!-- Feed signer private key -->
+				<ResponsiveLayout
+					--responsive-align-items="start"
+					--responsive-justify-content="stretch"
+					--responsive-gap="var(--quarter-padding)"
+				>
+					<Typography class={!layoutStore.mobile ? 'flex50 input-layout' : ''}
+						>Feed signer private key</Typography
+					>
+					<Horizontal
+						class={!layoutStore.mobile ? 'flex50' : ''}
+						--horizontal-gap="var(--half-padding)"
+					>
+						<Input
+							variant="outline"
+							dimension="compact"
+							name="feed-signer-key"
+							value={toMetaMaskHex(exportedKeys.feedSignerHex)}
+							class="grower key-input"
+							disabled
+						/>
+						<CopyButton text={toMetaMaskHex(exportedKeys.feedSignerHex)} />
+					</Horizontal>
+				</ResponsiveLayout>
+
+				<!-- Parent / funds account key -->
 				<ResponsiveLayout
 					--responsive-align-items="start"
 					--responsive-justify-content="stretch"
 					--responsive-gap="var(--quarter-padding)"
 				>
 					<Vertical class={!layoutStore.mobile ? 'flex50 input-layout' : ''}>
-						<Typography>Backup hash</Typography>
-						{#if backupTimestamp}
-							<Typography variant="small" style="color: var(--colors-medium)">
-								Last backed up {new Date(backupTimestamp).toLocaleString()}
-							</Typography>
-						{/if}
+						<Typography>Parent account key</Typography>
+						<Typography variant="small" style="color: var(--color-text-secondary)">
+							{#if account?.type === 'passkey' || account?.type === 'agent'}
+								m/44'/60'/0'/0/0 — import into MetaMask as funds wallet
+							{:else}
+								Your SIWE-derived master key
+							{/if}
+						</Typography>
 					</Vertical>
 					<Horizontal
 						class={!layoutStore.mobile ? 'flex50' : ''}
@@ -495,30 +305,44 @@
 						<Input
 							variant="outline"
 							dimension="compact"
-							name="backup-ref"
-							value={backupReference}
+							name="parent-key"
+							value={toMetaMaskHex(exportedKeys.parentKeyHex)}
 							class="grower key-input"
 							disabled
 						/>
-						<CopyButton text={backupReference} />
+						<CopyButton text={toMetaMaskHex(exportedKeys.parentKeyHex)} />
 					</Horizontal>
 				</ResponsiveLayout>
-			{/if}
 
-			<Horizontal --horizontal-gap="var(--half-padding)">
-				<Button
-					variant={backupReference ? 'ghost' : 'strong'}
-					dimension="compact"
-					onclick={handleBackup}
-					disabled={isBackingUp || !backupBatchIdValid}
-				>
-					{isBackingUp ? 'Backing up…' : backupReference ? 'Back up again' : 'Back up now'}
-				</Button>
-			</Horizontal>
+				<!-- BIP-39 mnemonic (passkey/agent only) -->
+				{#if exportedKeys.mnemonic}
+					<ResponsiveLayout
+						--responsive-align-items="start"
+						--responsive-justify-content="stretch"
+						--responsive-gap="var(--quarter-padding)"
+					>
+						<Vertical class={!layoutStore.mobile ? 'flex50 input-layout' : ''}>
+							<Typography>Recovery phrase</Typography>
+							<Typography variant="small" style="color: var(--color-text-secondary)">
+								24-word BIP-39 phrase — recovers all keys including feed signer
+							</Typography>
+						</Vertical>
+						<Vertical
+							class={!layoutStore.mobile ? 'flex50' : ''}
+							--vertical-gap="var(--quarter-gap)"
+						>
+							<div class="mnemonic-grid">
+								{#each exportedKeys.mnemonic.split(' ') as word, i (i)}
+									<span class="mnemonic-word"><span class="mnemonic-n">{i + 1}.</span> {word}</span>
+								{/each}
+							</div>
+							<CopyButton text={exportedKeys.mnemonic} />
+						</Vertical>
+					</ResponsiveLayout>
+				{/if}
 
-			{#if backupError}
-				<ErrorMessage>{backupError}</ErrorMessage>
-			{/if}
+				<Button variant="ghost" dimension="compact" onclick={handleHideKeys}>Hide keys</Button>
+			</Vertical>
 		{/if}
 	</Vertical>
 

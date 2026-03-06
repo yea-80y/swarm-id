@@ -134,7 +134,53 @@ export async function decryptMasterKey(
 }
 
 // ============================================================================
-// Secret Seed Encryption (encrypted with key derived from masterKey)
+// Secret Seed Encryption v2 — derived from SIWE public key (not masterKey)
+// ============================================================================
+
+/**
+ * Derive encryption key for secretSeed from the SIWE public key + encryption salt.
+ *
+ * Uses the same root material as deriveEncryptionKey (SIWE publicKey + salt) but
+ * a different HKDF info string for domain separation. This breaks the circular
+ * dependency where secretSeed was previously encrypted with a masterKey-derived key:
+ *
+ *   Old (v1): secretSeed → masterKey → encryptionKey → encryptedSecretSeed  (circular)
+ *   New (v2): wallet SIWE → publicKey → HKDF(info=v2) → encryptionKey → encryptedSecretSeed
+ *
+ * Recovery benefit: wallet alone can decrypt secretSeed via SIWE, then
+ * secretSeed + wallet can re-derive masterKey — no Swarm backup needed.
+ *
+ * @param publicKey - Hex string of ECDSA public key (from SIWE signature)
+ * @param salt - Encryption salt stored with the account (same as masterKey encryption)
+ * @returns CryptoKey for AES-GCM encryption/decryption of secretSeed
+ */
+export async function deriveSecretSeedEncryptionKeyFromSIWE(
+	publicKey: string,
+	salt: Bytes | string,
+): Promise<CryptoKey> {
+	const publicKeyBytes = new Bytes(publicKey).toUint8Array()
+	const saltBytes = salt instanceof Bytes ? salt.toUint8Array() : new Bytes(salt).toUint8Array()
+
+	const keyMaterial = await crypto.subtle.importKey('raw', publicKeyBytes, 'HKDF', false, [
+		'deriveKey',
+	])
+
+	return crypto.subtle.deriveKey(
+		{
+			name: 'HKDF',
+			salt: saltBytes,
+			hash: 'SHA-256',
+			info: new TextEncoder().encode('swarm-id-secretseed-encryption-v2'),
+		},
+		keyMaterial,
+		{ name: 'AES-GCM', length: 256 },
+		false,
+		['encrypt', 'decrypt'],
+	)
+}
+
+// ============================================================================
+// Secret Seed Encryption v1 — derived from masterKey (legacy, kept for reference)
 // ============================================================================
 
 /**

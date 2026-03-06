@@ -16,11 +16,16 @@
 		ChevronLeft,
 		ChevronRight,
 		CloseLarge,
+		CloudUpload,
 		IbmCloudHyperProtectCryptoServices,
 		Information,
 		Rocket,
 		TrashCan,
 	} from 'carbon-icons-svelte'
+	import { identitiesStore } from '$lib/stores/identities.svelte'
+	import { connectedAppsStore } from '$lib/stores/connected-apps.svelte'
+	import { deleteMnemonicBackup } from '$lib/utils/passkey-mnemonic'
+	import { sessionStore } from '$lib/stores/session.svelte'
 	import NetworkSettingsModal from './network-settings-modal.svelte'
 	import ThemeToggle from './theme-toggle.svelte'
 	import FlexItem from '$lib/components/ui/flex-item.svelte'
@@ -34,6 +39,7 @@
 	import CopyButton from './copy-button.svelte'
 	import Tooltip from './ui/tooltip.svelte'
 	import ViewGenerationDetailsModal from './view-generation-details-modal.svelte'
+	import BackupAccountModal from './backup-account-modal.svelte'
 	import Bot from 'carbon-icons-svelte/lib/Bot.svelte'
 
 	type Props = {
@@ -51,6 +57,7 @@
 	let showUpgradeTooltip = $state(false)
 	let networkSettingsModalOpen = $state(false)
 	let showGenerationDetailsModal = $state(false)
+	let showBackupModal = $state(false)
 
 	$effect(() => {
 		accountName = account.name
@@ -72,9 +79,39 @@
 	}
 
 	function selectAccount(acc: Account) {
-		const firstAccountIdentity = identities.find((identity) => identity.accountId === acc.id)
+		const firstAccountIdentity = identitiesStore.identities.find((i) => i.accountId.equals(acc.id))
 		if (firstAccountIdentity) {
 			handleIdentityClick(firstAccountIdentity)
+		}
+	}
+
+	async function deleteAccount(acc: Account) {
+		// Remove all connected apps for this account's identities
+		const accountIdentities = identitiesStore.getIdentitiesByAccount(acc.id)
+		for (const identity of accountIdentities) {
+			const appsForIdentity = connectedAppsStore.apps.filter((a) => a.identityId === identity.id)
+			for (const app of appsForIdentity) {
+				connectedAppsStore.removeApp(app.appUrl, identity.id)
+			}
+			identitiesStore.removeIdentity(identity.id)
+		}
+
+		// Clean up passkey mnemonic backup from IndexedDB if applicable
+		if (acc.type === 'passkey') {
+			await deleteMnemonicBackup(acc.id.toHex())
+		}
+
+		accountsStore.removeAccount(acc.id)
+
+		// If we deleted the active account, navigate away
+		if (sessionStore.data.account?.id.equals(acc.id)) {
+			drawerOpen = false
+			const remaining = accountsStore.accounts
+			if (remaining.length > 0) {
+				selectAccount(remaining[0])
+			} else {
+				goto(resolve(routes.ACCOUNT_NEW))
+			}
 		}
 	}
 
@@ -211,27 +248,53 @@
 				</Horizontal>
 				<Vertical --vertical-gap="0" style="padding: var(--padding)">
 					{#each accountsStore.accounts as acc (acc.id)}
-						<Button variant="ghost" dimension="compact" onclick={() => selectAccount(acc)}>
-							<Horizontal
-								--horizontal-gap="var(--half-padding)"
-								--horizontal-align-items="center"
-								--horizontal-justify-content="stretch"
-								style="flex: 1"
+						{@const hasIdentities = identitiesStore.identities.some((i) =>
+							i.accountId.equals(acc.id),
+						)}
+						{@const isActive = account.id.equals(acc.id)}
+						<Horizontal --horizontal-gap="0" --horizontal-align-items="center">
+							<Button
+								variant="ghost"
+								dimension="compact"
+								onclick={() => selectAccount(acc)}
+								style="flex: 1; min-width: 0"
 							>
-								{#if acc.type === 'ethereum'}
-									<EthereumLogo size={20} />
-								{:else if acc.type === 'agent'}
-									<Bot size={20} />
-								{:else}
-									<PasskeyLogo size={20} />
-								{/if}
-								{acc.name}
-								<FlexItem />
-								{#if account.id === acc.id}
-									<Checkmark size={20} />
-								{/if}
-							</Horizontal>
-						</Button>
+								<Horizontal
+									--horizontal-gap="var(--half-padding)"
+									--horizontal-align-items="center"
+									--horizontal-justify-content="stretch"
+									style="flex: 1"
+								>
+									{#if acc.type === 'ethereum'}
+										<EthereumLogo size={20} />
+									{:else if acc.type === 'agent'}
+										<Bot size={20} />
+									{:else}
+										<PasskeyLogo size={20} />
+									{/if}
+									<span class="account-name-text">{acc.name}</span>
+									<FlexItem />
+									{#if isActive}
+										<Checkmark size={20} />
+									{:else if !hasIdentities}
+										<Typography variant="small" style="color: var(--colors-medium)"
+											>empty</Typography
+										>
+									{/if}
+								</Horizontal>
+							</Button>
+							{#if !isActive}
+								<Button
+									variant="ghost"
+									dimension="compact"
+									danger
+									onclick={() => deleteAccount(acc)}
+									title="Delete {acc.name}"
+								>
+									<TrashCan size={16} />
+								</Button>
+							{/if}
+						</Horizontal>
 					{/each}
 				</Vertical>
 				<Divider --margin="0" />
@@ -343,6 +406,15 @@
 							View Generation Details
 						</Button>
 					{/if}
+					<Button
+						variant="ghost"
+						dimension="compact"
+						onclick={() => (showBackupModal = true)}
+						leftAlign
+					>
+						<CloudUpload size={20} />
+						Backup account
+					</Button>
 
 					<Horizontal
 						--horizontal-gap="var(--half-padding)"
@@ -380,7 +452,13 @@
 							{/snippet}
 						</Tooltip>
 					</Horizontal>
-					<Button variant="ghost" dimension="compact" danger leftAlign onclick={notImplemented}>
+					<Button
+						variant="ghost"
+						dimension="compact"
+						danger
+						leftAlign
+						onclick={() => deleteAccount(account)}
+					>
 						<TrashCan size={20} />
 						Delete account
 					</Button>
@@ -398,9 +476,22 @@
 	/>
 {/if}
 
+<BackupAccountModal
+	bind:open={showBackupModal}
+	bind:drawerOpen
+	{account}
+	onClose={() => (showBackupModal = false)}
+/>
+
 <NetworkSettingsModal bind:open={networkSettingsModalOpen} />
 
 <style>
+	.account-name-text {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	.drawer {
 		position: absolute;
 		top: var(--double-padding);

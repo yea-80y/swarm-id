@@ -10,7 +10,6 @@
 	import { resolve } from '$app/paths'
 	import routes from '$lib/routes'
 	import { layoutStore } from '$lib/stores/layout.svelte'
-	import { notImplemented } from '$lib/utils/not-implemented'
 	import type { Snippet } from 'svelte'
 
 	interface Props {
@@ -28,8 +27,8 @@
 		goto(resolve(routes.ETH_NEW))
 	}
 
-	function handleSignInClick(e: Event) {
-		notImplemented(e)
+	function handleSignInClick() {
+		goto(resolve(routes.SIGN_IN))
 	}
 </script>
 
@@ -114,6 +113,12 @@
 		<Typography variant="small">
 			<a href={resolve(routes.PASSKEY_RECOVER)}>Lost passkey access? Recover with recovery phrase</a
 			>
+		</Typography>
+		<Typography variant="small">
+			<a href={resolve(routes.ETH_RECOVER)}>Recover Ethereum account with secret seed</a>
+		</Typography>
+		<Typography variant="small">
+			<a href={resolve(routes.BACKUP_RECOVER)}>Restore account from Swarm backup</a>
 		</Typography>
 	</div>
 </Vertical>

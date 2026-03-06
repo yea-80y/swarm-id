@@ -5,8 +5,17 @@
  * and implementing Sign-In with Ethereum (SIWE) for account creation.
  */
 
-import { BrowserProvider, JsonRpcSigner, hashMessage, SigningKey, BaseWallet } from 'ethers'
+import {
+	BrowserProvider,
+	JsonRpcSigner,
+	hashMessage,
+	SigningKey,
+	BaseWallet,
+	keccak256,
+	toUtf8Bytes,
+} from 'ethers'
 import type { Eip1193Provider } from 'ethers'
+import { hexToBytes } from '@noble/hashes/utils'
 import Onboard from '@web3-onboard/core'
 import injectedModule from '@web3-onboard/injected-wallets'
 import { EthAddress, Bytes } from '@ethersphere/bee-js'
@@ -175,4 +184,61 @@ export async function connectAndSign(): Promise<SignedMessage> {
 	})
 
 	return signed
+}
+
+// ============================================================================
+// EIP-712 Encryption Identity — deterministic seed from wallet signature
+// ============================================================================
+
+/**
+ * EIP-712 domain for encryption key derivation.
+ *
+ * Same pattern as WoCo's DerivePodIdentity — a fixed-nonce EIP-712 message
+ * produces a deterministic signature, which keccak256-hashes to a 32-byte seed.
+ * HKDF with different info strings derives independent keys from this seed.
+ */
+const ENCRYPTION_DOMAIN = { name: 'Swarm ID', version: '1' } as const
+
+const ENCRYPTION_TYPES = {
+	DeriveEncryptionKey: [
+		{ name: 'purpose', type: 'string' },
+		{ name: 'address', type: 'address' },
+		{ name: 'nonce', type: 'string' },
+	],
+}
+
+const ENCRYPTION_NONCE = 'SWARM-ID-ENCRYPTION-V1'
+
+/**
+ * Connect wallet and sign EIP-712 to derive a deterministic encryption seed.
+ *
+ * Same wallet → same signature → same seed → same X25519 keypair on any device.
+ * No secretSeed dependency — only needs the wallet.
+ *
+ * Call this AFTER connectAndSign() — the wallet will already be connected
+ * so only the EIP-712 signature popup appears (not a fresh wallet selection).
+ */
+export async function deriveEncryptionSeed(): Promise<Uint8Array> {
+	const wallets = await onboard.connectWallet()
+	if (wallets.length === 0) {
+		throw new Error('No ethereum wallet found')
+	}
+
+	const provider = new BrowserProvider(wallets[0].provider, 'any')
+	const signer = await provider.getSigner()
+
+	console.log('📝 Requesting encryption identity signature...')
+	const signature = await signer.signTypedData(
+		{ ...ENCRYPTION_DOMAIN },
+		{ ...ENCRYPTION_TYPES },
+		{
+			purpose: 'Derive deterministic encryption identity',
+			address: signer.address,
+			nonce: ENCRYPTION_NONCE,
+		},
+	)
+
+	// Deterministic: same wallet → same signature → same 32-byte seed
+	const seedHex = keccak256(toUtf8Bytes(signature))
+	return hexToBytes(seedHex.slice(2))
 }

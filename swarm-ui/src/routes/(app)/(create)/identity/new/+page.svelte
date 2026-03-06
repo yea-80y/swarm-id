@@ -6,6 +6,7 @@
 	import Checkmark from 'carbon-icons-svelte/lib/Checkmark.svelte'
 	import Information from 'carbon-icons-svelte/lib/Information.svelte'
 	import ChevronDown from 'carbon-icons-svelte/lib/ChevronDown.svelte'
+	import Divider from '$lib/components/ui/divider.svelte'
 	import routes from '$lib/routes'
 	import Hashicon from '$lib/components/hashicon.svelte'
 	import CreationLayout from '$lib/components/creation-layout.svelte'
@@ -56,6 +57,14 @@
 	const hasSessionData = $derived(
 		sessionStore.data.account !== undefined && sessionStore.data.temporaryMasterKey !== undefined,
 	)
+
+	// True when this account has no identities yet — could be a new device setup or genuinely new account.
+	// Show a hint to restore from Swarm backup instead of creating fresh.
+	const hasNoIdentities = $derived.by(() => {
+		const account = sessionStore.data.account
+		if (!account) return false
+		return !identitiesStore.identities.some((i) => i.accountId.equals(account.id))
+	})
 
 	const accountName = $derived(sessionStore.data.account?.name ?? '')
 
@@ -154,6 +163,23 @@
 			<Typography>No account data found. Please start from the home page.</Typography>
 		{:else}
 			<Vertical --vertical-gap="var(--padding)">
+				{#if hasNoIdentities}
+					<Vertical --vertical-gap="var(--half-padding)">
+						<Typography variant="small" style="color: var(--colors-medium)">
+							Returning from another device? If you previously set up this account, restore your
+							identities and apps from a Swarm backup instead of creating a new identity.
+						</Typography>
+						<Button
+							dimension="compact"
+							variant="ghost"
+							onclick={() => goto(resolve(routes.BACKUP_RECOVER))}
+						>
+							Restore from Swarm backup
+						</Button>
+					</Vertical>
+					<Divider />
+				{/if}
+
 				<!-- Identity name input -->
 				<Vertical --vertical-gap="var(--quarter-padding)">
 					<Horizontal --horizontal-gap="var(--half-padding)" --horizontal-align-items="end">

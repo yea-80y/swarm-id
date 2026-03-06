@@ -13,7 +13,8 @@
 	import { accountsStore } from '$lib/stores/accounts.svelte'
 	import { mnemonicToMasterKey } from '$lib/utils/passkey-mnemonic'
 	import { validateSeedPhrase, countSeedPhraseWords } from '$lib/agent-account'
-	import { createEthereumWalletFromSeed } from '$lib/passkey'
+	import { createEthereumWalletFromSeed, authenticateWithPasskey } from '$lib/passkey'
+	import { deriveAccountSwarmEncryptionKey } from '@swarm-id/lib'
 
 	let phrase = $state('')
 	let error = $state<string | undefined>(undefined)
@@ -42,15 +43,41 @@
 			const wallet = createEthereumWalletFromSeed(masterKey.toUint8Array())
 
 			// Find matching passkey account in store
-			const account = accountsStore.accounts.find(
+			let account = accountsStore.accounts.find(
 				(a) => a.type === 'passkey' && a.id.equals(wallet.address),
 			)
 
 			if (!account) {
-				error =
-					'No passkey account found for this recovery phrase. Make sure you are using the phrase for an account on this device.'
-				isProcessing = false
-				return
+				// Account not in localStorage — this device hasn't been set up yet.
+				// Authenticate with the synced passkey to get credentialId and verify
+				// the PRF output matches the mnemonic-derived master key.
+				try {
+					const passkeyResult = await authenticateWithPasskey({ rpId: window.location.hostname })
+
+					if (passkeyResult.masterKey.toHex() !== masterKey.toHex()) {
+						error =
+							'The recovery phrase does not match this passkey. Make sure you entered the correct phrase for this credential.'
+						isProcessing = false
+						return
+					}
+
+					const swarmEncryptionKey = await deriveAccountSwarmEncryptionKey(masterKey.toHex())
+					account = accountsStore.addAccount({
+						id: wallet.address,
+						name: 'Recovered Account',
+						createdAt: Date.now(),
+						type: 'passkey',
+						credentialId: passkeyResult.credentialId,
+						swarmEncryptionKey,
+					})
+				} catch {
+					error =
+						'Account not found on this device. ' +
+						'If your passkey is synced (iCloud / Google Password Manager), approve the passkey prompt. ' +
+						'Otherwise use "Restore from Swarm backup" to restore your account to this device.'
+					isProcessing = false
+					return
+				}
 			}
 
 			// Restore session — same state as after a successful passkey authentication

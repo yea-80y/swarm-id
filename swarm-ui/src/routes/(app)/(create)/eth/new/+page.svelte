@@ -22,7 +22,7 @@
 		generateEncryptionSalt,
 		deriveEncryptionKey,
 		encryptMasterKey,
-		deriveSecretSeedEncryptionKey,
+		deriveSecretSeedEncryptionKeyFromSIWE,
 		encryptSecretSeed,
 	} from '$lib/utils/encryption'
 	import { validateSecretSeed } from '$lib/utils/secret-seed'
@@ -106,10 +106,13 @@
 			const encryptedMasterKey = await encryptMasterKey(masterKey, encryptionKey)
 			console.log('✅ MasterKey encrypted')
 
-			// Step 5: Encrypt secretSeed with masterKey as encryption key
-			const secretSeedEncryptionKey = await deriveSecretSeedEncryptionKey(masterKey)
+			// Step 5: Encrypt secretSeed with SIWE public key (v2 scheme — wallet can decrypt without masterKey)
+			const secretSeedEncryptionKey = await deriveSecretSeedEncryptionKeyFromSIWE(
+				signed.publicKey,
+				encryptionSalt,
+			)
 			const encryptedSecretSeed = await encryptSecretSeed(secretSeed, secretSeedEncryptionKey)
-			console.log('✅ Secret seed encrypted with masterKey')
+			console.log('✅ Secret seed encrypted with SIWE key (v2)')
 
 			// Store account with encrypted masterKey, encrypted secret seed, and feed signer address
 			const newAccount = accountsStore.addAccount({
