@@ -1,60 +1,52 @@
 /**
  * Backup encryption key derivation — Phase 4
  *
- * Derives an X25519 keypair used to ECIES-encrypt the account backup payload.
- * The derivation method differs per account type, but the resulting keypair
- * interface is identical so the caller does not need to know the source.
+ * Derives two keys from a 32-byte entropy seed via HKDF domain separation:
+ *
+ *   HKDF(entropy, "swarm-id/backup-enc/v1")    → X25519 private key  (ECIES payload encryption)
+ *   HKDF(entropy, "swarm-id/backup-signer/v1") → secp256k1 private key (backup SOC owner/signer)
+ *
+ * The entropy source differs by account type — the derivation is identical:
  *
  * Passkey users:
- *   HKDF(masterKey, info="swarm-id/backup-enc/v1") → 32-byte X25519 private key
- *   No EIP-712 needed — masterKey is already in session from passkey auth.
+ *   entropy = masterKey (32 bytes from passkey PRF → HKDF)
+ *   Already in session after passkey auth. No wallet popup needed.
  *
- * Web3 wallet users:
- *   EIP-712 (fixed nonce) → secp256k1 signature bytes
- *   → HKDF(sig[0..64], info="swarm-id/backup-enc/v1") → 32-byte X25519 private key
- *   MetaMask handles the EIP-712 popup natively — no custom UI needed.
+ * Web3 / Para wallet users:
+ *   entropy = hexToBytes(podSeedHex)
+ *   podSeed = keccak256(EIP-712 "DerivePodIdentity" signature, fixed nonce)
+ *   This is the same seed WoCo already uses for ed25519 POD signing and attendee
+ *   data encryption (via HKDF "woco/encryption/v1"). No extra wallet popup:
+ *   the seed is cached in IndexedDB from initial POD identity setup
+ *   (restorePodSeed()), or re-derived with one popup if not cached.
  *
- * Para wallet users:
- *   Same as web3, but Para SDK must be called explicitly via custom UI.
- *   The signEip712ForBackup() function accepts the signature bytes regardless of source.
+ * Why this is secure:
+ *   - HKDF with distinct info strings is cryptographically independent: knowing
+ *     one derived key tells you nothing about the others or the seed.
+ *   - secp256k1 from 32 HKDF bytes: valid. @noble/curves handles the negligible
+ *     edge case where bytes ≥ curve order (probability ≈ 4 × 10⁻³⁸).
+ *   - X25519 clamping is applied internally by @noble/curves at use time.
+ *   - Same security model as BIP-32: seed compromise = all children compromised,
+ *     but child compromise does not reveal seed or siblings.
  *
- * The X25519 private key is 32 bytes. @noble/curves handles clamping at use time.
- * The keypair is ephemeral in memory — never persisted.
+ * No circular dependency on restore:
+ *   Web3/Para: wallet → POD identity EIP-712 → podSeed → backup signer address
+ *     → find SOC on Swarm → decrypt payload → restore account. No masterKey needed
+ *     to locate the SOC.
+ *   Passkey: passkey PRF → masterKey → backup signer address → find SOC → restore.
  */
 
 import { x25519 } from '@noble/curves/ed25519'
 import { hkdf } from '@noble/hashes/hkdf'
 import { sha256 } from '@noble/hashes/sha256'
-import { BrowserProvider, TypedDataEncoder } from 'ethers'
-import type { Eip1193Provider, TypedDataField } from 'ethers'
+import { PrivateKey } from '@ethersphere/bee-js'
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 const BACKUP_ENC_INFO = new TextEncoder().encode('swarm-id/backup-enc/v1')
-
-/**
- * Fixed EIP-712 domain and message — deterministic across all signings.
- * No chainId: backup keys are chain-agnostic (not used in any on-chain tx).
- * No nonce: intentional — same wallet must always produce the same key.
- */
-const EIP712_DOMAIN = {
-	name: 'Swarm ID Backup',
-	version: '1',
-} as const
-
-const EIP712_TYPES: Record<string, TypedDataField[]> = {
-	BackupKey: [
-		{ name: 'purpose', type: 'string' },
-		{ name: 'version', type: 'uint256' },
-	],
-}
-
-const EIP712_MESSAGE = {
-	purpose: 'Account backup encryption key — off-chain only, never broadcast',
-	version: 1n,
-} as const
+const BACKUP_SIGNER_INFO = new TextEncoder().encode('swarm-id/backup-signer/v1')
 
 // ============================================================================
 // Types
@@ -63,120 +55,40 @@ const EIP712_MESSAGE = {
 export interface BackupKeypair {
 	/** X25519 private key (32 bytes) — keep in memory only, never persist */
 	privateKey: Uint8Array
-	/** X25519 public key (32 bytes) — safe to share, used for encryption */
+	/** X25519 public key (32 bytes) — safe to share, used as ECIES recipient key */
 	publicKey: Uint8Array
 }
 
 // ============================================================================
-// Shared derivation
+// Derivation
 // ============================================================================
 
-function deriveX25519FromBytes(entropy: Uint8Array): BackupKeypair {
+/**
+ * Derive the X25519 keypair used to ECIES-encrypt the backup payload.
+ *
+ * @param entropy  32-byte seed:
+ *   - passkey users:    masterKey (from passkey PRF)
+ *   - web3/Para users:  hexToBytes(podSeedHex) from restorePodSeed()
+ */
+export function deriveBackupKeypair(entropy: Uint8Array): BackupKeypair {
 	const privateKey = hkdf(sha256, entropy, new Uint8Array(0), BACKUP_ENC_INFO, 32)
 	const publicKey = x25519.getPublicKey(privateKey)
 	return { privateKey, publicKey }
 }
 
-// ============================================================================
-// Per-account-type derivation
-// ============================================================================
-
-/**
- * Derive backup keypair for passkey accounts.
- * masterKey is already available in session after passkey auth — no extra signing.
- */
-export function deriveBackupKeypairFromMasterKey(masterKey: Uint8Array): BackupKeypair {
-	return deriveX25519FromBytes(masterKey)
-}
-
-/**
- * Derive backup keypair for web3 wallet (MetaMask) accounts.
- * Requests MetaMask to sign the fixed EIP-712 message, then derives X25519 from the sig.
- *
- * The signature is deterministic: same wallet + fixed message → same sig → same keypair.
- * MetaMask shows its own popup — no custom UI needed in swarm-ui.
- */
-export async function deriveBackupKeypairFromWallet(
-	provider: Eip1193Provider,
-): Promise<BackupKeypair> {
-	const ethersProvider = new BrowserProvider(provider, 'any')
-	const signer = await ethersProvider.getSigner()
-
-	const signature: string = await signer.signTypedData(EIP712_DOMAIN, EIP712_TYPES, EIP712_MESSAGE)
-
-	// Signature is 65 bytes (r + s + v) hex-encoded with 0x prefix.
-	// Use all 64 bytes of r+s as entropy (drop the 1-byte v).
-	const sigBytes = hexToBytes(signature.slice(2, 130))
-	return deriveX25519FromBytes(sigBytes)
-}
-
-/**
- * Derive backup keypair from a raw EIP-712 signature (65 bytes, hex).
- * Used by Para wallet users after their custom UI has called the Para SDK.
- * The signature MUST be produced from the same fixed EIP-712 domain/message above.
- */
-export function deriveBackupKeypairFromSignature(signatureHex: string): BackupKeypair {
-	const hex = signatureHex.startsWith('0x') ? signatureHex.slice(2) : signatureHex
-	const sigBytes = hexToBytes(hex.slice(0, 128)) // r+s only (64 bytes)
-	return deriveX25519FromBytes(sigBytes)
-}
-
-/**
- * Returns the EIP-712 typed data that Para (or any other signer) must sign.
- * Use this to construct the Para SDK signing request.
- */
-export function getBackupEip712Payload(): {
-	domain: typeof EIP712_DOMAIN
-	types: Record<string, TypedDataField[]>
-	message: { purpose: string; version: string }
-	primaryType: 'BackupKey'
-} {
-	return {
-		domain: EIP712_DOMAIN,
-		types: EIP712_TYPES,
-		// Para SDK expects serialisable values — convert bigint to string
-		message: { purpose: EIP712_MESSAGE.purpose, version: EIP712_MESSAGE.version.toString() },
-		primaryType: 'BackupKey',
-	}
-}
-
-/**
- * Returns the EIP-712 hash for display / verification purposes.
- */
-export function getBackupEip712Hash(): string {
-	return TypedDataEncoder.hash(EIP712_DOMAIN, EIP712_TYPES, {
-		purpose: EIP712_MESSAGE.purpose,
-		version: EIP712_MESSAGE.version,
-	})
-}
-
-// ============================================================================
-// Backup SOC signer (secp256k1) — user owns their backup SOC from day one
-// ============================================================================
-
-import { PrivateKey } from '@ethersphere/bee-js'
-
-const BACKUP_SIGNER_INFO = new TextEncoder().encode('swarm-id/backup-signer/v1')
-
 /**
  * Derive the secp256k1 key that OWNS and SIGNS the user's backup SOC.
- * Deterministic from masterKey — same key on every device, every session.
- * User controls their backup SOC. Platform never signs it.
+ *
+ * User controls their backup SOC from day one. Platform never signs it.
  * Platform only signs a separate discovery registry feed.
+ *
+ * The SOC owner address = deriveBackupSigner(entropy).publicKey().address().
+ * This address is computable without masterKey for web3/Para users (use podSeed),
+ * which avoids the circular dependency: "need masterKey to find SOC that holds masterKey".
+ *
+ * @param entropy  Same 32-byte seed as deriveBackupKeypair.
  */
-export function deriveBackupSigner(masterKey: Uint8Array): PrivateKey {
-	const keyBytes = hkdf(sha256, masterKey, new Uint8Array(0), BACKUP_SIGNER_INFO, 32)
+export function deriveBackupSigner(entropy: Uint8Array): PrivateKey {
+	const keyBytes = hkdf(sha256, entropy, new Uint8Array(0), BACKUP_SIGNER_INFO, 32)
 	return new PrivateKey(keyBytes)
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-function hexToBytes(hex: string): Uint8Array {
-	const bytes = new Uint8Array(hex.length / 2)
-	for (let i = 0; i < bytes.length; i++) {
-		bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-	}
-	return bytes
 }

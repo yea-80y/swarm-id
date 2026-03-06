@@ -5,7 +5,7 @@
  * as an ECIES-encrypted payload in a Swarm Single Owner Chunk (SOC).
  *
  * SOC structure:
- *   owner   = platform secp256k1 key (short-term; migrates to user key in Phase 5)
+ *   owner   = user's derived secp256k1 key (from deriveBackupSigner in backup-encryption.ts)
  *   topic   = keccak256(userEthAddress + "swarm-id/backup/v1")  [32 bytes]
  *   content = JSON(SealedBox) where SealedBox = ECIES_encrypt(X25519, BackupPayload)
  *
@@ -13,11 +13,12 @@
  * the user's ETH address alone, no hash storage needed. CAC requires storing the hash.
  *
  * Discovery on restore:
- *   connect wallet/passkey → derive userEthAddress
- *   → compute topic → compute SOC address (using known platform address)
+ *   connect wallet/passkey → derive entropy (masterKey or podSeed)
+ *   → deriveBackupSigner(entropy).publicKey().address() = ownerAddress
+ *   → compute topic → compute SOC address (owner + topic → deterministic)
  *   → fetch from any Swarm gateway → decrypt
  *
- * Batch: platform batch (short-term). UI slot for user batch in Phase 5.
+ * Batch: platform batch (short-term). UI slot for user-owned batch in a later phase.
  */
 
 import { Bee, PrivateKey } from '@ethersphere/bee-js'
@@ -139,21 +140,21 @@ export async function writeAccountBackup(
  * Returns undefined if no backup exists or if decryption fails.
  * Call this on first load when localStorage is empty (new device detection).
  *
- * @param bee              Bee client
- * @param platformAddress  Platform's ETH address (SOC owner — must match write side)
- * @param userEthAddress   User's root ETH address (derives topic)
- * @param keypair          X25519 keypair for decryption (same derivation as write)
+ * @param bee            Bee client
+ * @param ownerAddress   SOC owner address = deriveBackupSigner(entropy).publicKey().address()
+ * @param userEthAddress User's root ETH address (derives topic)
+ * @param keypair        X25519 keypair for decryption (same derivation as write)
  */
 export async function readAccountBackup(
 	bee: Bee,
-	platformAddress: EthAddress,
+	ownerAddress: EthAddress,
 	userEthAddress: EthAddress,
 	keypair: BackupKeypair,
 ): Promise<BackupPayload | undefined> {
 	try {
 		const topic = deriveBackupTopic(userEthAddress)
 
-		const socReader = bee.makeSOCReader(platformAddress)
+		const socReader = bee.makeSOCReader(ownerAddress)
 		const soc = await socReader.download(topic)
 		const content = soc.payload.toUint8Array()
 
@@ -168,15 +169,17 @@ export async function readAccountBackup(
 /**
  * Check whether a backup SOC exists for the given user address.
  * Does not decrypt — just checks presence. Useful for showing "Restore" option.
+ *
+ * @param ownerAddress  = deriveBackupSigner(entropy).publicKey().address()
  */
 export async function backupExists(
 	bee: Bee,
-	platformAddress: EthAddress,
+	ownerAddress: EthAddress,
 	userEthAddress: EthAddress,
 ): Promise<boolean> {
 	try {
 		const topic = deriveBackupTopic(userEthAddress)
-		const socReader = bee.makeSOCReader(platformAddress)
+		const socReader = bee.makeSOCReader(ownerAddress)
 		await socReader.download(topic)
 		return true
 	} catch {
