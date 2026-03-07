@@ -88,6 +88,10 @@ export const EthereumAccountSchemaV1 = z.object({
   // 'publickey' (legacy/absent): HKDF(SIWE_publicKey, salt) — vulnerable if publicKey is on-chain.
   // 'eip712' (current):         HKDF(keccak256(EIP-712_sig), salt) — safe for any wallet.
   encryptionScheme: z.enum(["publickey", "eip712"]).optional(),
+  // Wallet provider used to sign during account creation.
+  // undefined/'injected': browser-injected wallet (MetaMask etc).
+  // 'para': Para MPC wallet — signing done via Para SDK, not window.ethereum.
+  walletProvider: z.enum(["injected", "para"]).optional(),
 })
 
 /**

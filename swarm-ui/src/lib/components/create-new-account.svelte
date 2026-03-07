@@ -111,6 +111,9 @@
 			</Typography>
 		{/if}
 		<Typography variant="small">
+			<a href={resolve(routes.PARA_NEW)}>Sign up with Para (email wallet)</a>
+		</Typography>
+		<Typography variant="small">
 			<a href={resolve(routes.PASSKEY_RECOVER)}>Lost passkey access? Recover with recovery phrase</a
 			>
 		</Typography>

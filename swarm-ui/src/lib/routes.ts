@@ -7,6 +7,7 @@ const routes = {
 	PASSKEY_RECOVER: '/(app)/(create)/passkey/recover' as const,
 	BACKUP_RECOVER: '/(app)/(create)/backup/recover' as const,
 	ETH_NEW: '/(app)/(create)/eth/new' as const,
+	PARA_NEW: '/(app)/(create)/para/new' as const,
 	ETH_RECOVER: '/(app)/(create)/eth/recover' as const,
 	SIGN_IN: '/(app)/(create)/signin' as const,
 	AGENT_NEW: '/(app)/(create)/agent/new' as const,

@@ -52,6 +52,8 @@
 		"pnpm": "10.x"
 	},
 	"dependencies": {
+		"@getpara/ethers-v6-integration": "^2.12.0",
+		"@getpara/web-sdk": "^2.12.0",
 		"@ethersphere/bee-js": "link:../bee-js",
 		"@noble/curves": "^1.2.0",
 		"@noble/hashes": "^1.8.0",

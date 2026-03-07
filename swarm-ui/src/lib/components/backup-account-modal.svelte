@@ -19,6 +19,7 @@
 		SeedPhraseRequiredError,
 	} from '$lib/utils/account-auth'
 	import { deriveEncryptionSeed } from '$lib/ethereum'
+	import { deriveEncryptionSeedWithPara, ParaSessionExpiredError } from '$lib/para'
 	import { deriveBackupKeypair } from '$lib/utils/backup-encryption'
 	import { writeAccountBackup } from '$lib/utils/account-backup'
 	import type { BackupPayload } from '$lib/utils/account-backup'
@@ -113,14 +114,17 @@
 			let masterKeyHex: string | undefined
 
 			if (account.type === 'ethereum') {
-				// Ethereum accounts: two wallet interactions
-				// 1. SIWE → masterKey (to include in payload for recovery)
-				// 2. EIP-712 → deterministic encryption seed (independent of secretSeed)
+				// Ethereum accounts: two signing interactions
+				// 1. EIP-712 → decrypt masterKey (to include in payload for recovery)
+				// 2. EIP-712 → deterministic encryption seed for backup (independent derivation)
 				const masterKey = await getMasterKeyFromAccount(account)
 				masterKeyHex = masterKey.toHex()
 
-				// EIP-712 signature — wallet already connected, just one more popup
-				encryptionEntropy = await deriveEncryptionSeed()
+				// Second EIP-712 signature for backup encryption key
+				encryptionEntropy =
+					account.walletProvider === 'para'
+						? await deriveEncryptionSeedWithPara()
+						: await deriveEncryptionSeed()
 			} else if (account.type === 'agent') {
 				const masterKey = getMasterKeyFromAgentAccount(account, agentSeedPhrase)
 				masterKeyHex = masterKey.toHex()
@@ -180,6 +184,13 @@
 				open = true
 				drawerOpen = true
 				phase = 'ready'
+				return
+			}
+			if (err instanceof ParaSessionExpiredError) {
+				open = true
+				drawerOpen = true
+				error = 'Para session expired. Please sign in to Para again before creating a backup.'
+				phase = 'error'
 				return
 			}
 			error = err instanceof Error ? err.message : 'Backup failed. Please try again.'

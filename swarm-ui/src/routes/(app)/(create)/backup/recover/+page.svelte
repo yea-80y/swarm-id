@@ -24,6 +24,7 @@
 	import { readAccountBackup } from '$lib/utils/account-backup'
 	import type { BackupPayload } from '$lib/utils/account-backup'
 	import { deriveEncryptionSeed, connectAndSign } from '$lib/ethereum'
+	import { deriveEncryptionSeedWithPara, connectAndSignWithPara } from '$lib/para'
 	import { authenticateWithPasskey, createEthereumWalletFromSeed } from '$lib/passkey'
 	import { mnemonicToMasterKey } from '$lib/utils/passkey-mnemonic'
 	import {
@@ -40,11 +41,12 @@
 	} from '$lib/utils/encryption'
 	import { deriveAccountSwarmEncryptionKey } from '@swarm-id/lib'
 
-	type AccountTypeOption = 'ethereum' | 'passkey' | 'agent'
+	type AccountTypeOption = 'ethereum' | 'para' | 'passkey' | 'agent'
 	type Phase = 'idle' | 'decrypting' | 'preview' | 'restoring' | 'done'
 
 	const accountTypeItems = [
 		{ value: 'ethereum', label: 'Ethereum wallet' },
+		{ value: 'para', label: 'Para wallet' },
 		{ value: 'passkey', label: 'Passkey' },
 		{ value: 'agent', label: 'Agent (seed phrase)' },
 	]
@@ -126,6 +128,11 @@
 				recoveredEncryptionSeed = entropy
 				keypair = deriveBackupKeypair(entropy)
 				// masterAddress derived from payload after decryption
+			} else if (accountType === 'para') {
+				const entropy = await deriveEncryptionSeedWithPara()
+				recoveredEncryptionSeed = entropy
+				keypair = deriveBackupKeypair(entropy)
+				// masterAddress derived from payload after decryption
 			} else if (accountType === 'passkey') {
 				if (useMnemonicForPasskey) {
 					// Catastrophic recovery: all passkeys gone — derive masterKey from mnemonic directly
@@ -161,7 +168,7 @@
 			payload = result
 
 			// Derive account address for ethereum from masterKeyHex in payload
-			if (accountType === 'ethereum') {
+			if (accountType === 'ethereum' || accountType === 'para') {
 				if (!result.masterKeyHex) {
 					error =
 						'Backup does not contain a master key. This backup may belong to a passkey account.'
@@ -223,7 +230,7 @@
 						type: 'agent',
 						swarmEncryptionKey,
 					})
-				} else {
+				} else if (accountType === 'ethereum') {
 					// ethereum: sign SIWE for wallet address, reuse EIP-712 seed from decrypt phase
 					if (!payload.masterKeyHex) {
 						throw new Error('No master key in backup')
@@ -262,6 +269,45 @@
 						encryptedSecretSeed,
 						swarmEncryptionKey,
 						encryptionScheme: 'eip712',
+					})
+				} else {
+					// para: reuse EIP-712 seed from decrypt phase, get address from Para wallet
+					if (!payload.masterKeyHex) {
+						throw new Error('No master key in backup')
+					}
+					if (!recoveredEncryptionSeed) {
+						throw new Error('Encryption seed missing — try decrypting again')
+					}
+					const masterKey = new Bytes(payload.masterKeyHex)
+					const signed = await connectAndSignWithPara()
+					const encryptionSalt = generateEncryptionSalt()
+
+					// Reuse the EIP-712 encryptionSeed from the decrypt phase (no extra Para signing needed).
+					const masterKeyEncKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+						recoveredEncryptionSeed,
+						encryptionSalt,
+					)
+					const encryptedMasterKey = await encryptMasterKey(masterKey, masterKeyEncKey)
+
+					const secretSeedEncKey = await deriveSecretSeedEncryptionKeyFromEIP712(
+						recoveredEncryptionSeed,
+						encryptionSalt,
+					)
+					const encryptedSecretSeed = await encryptSecretSeed('', secretSeedEncKey)
+
+					const swarmEncryptionKey = await deriveAccountSwarmEncryptionKey(masterKey.toHex())
+					account = accountsStore.addAccount({
+						id: recoveredAddress,
+						name: 'Recovered Account',
+						createdAt: Date.now(),
+						type: 'ethereum',
+						ethereumAddress: new EthAddress(signed.address),
+						encryptedMasterKey,
+						encryptionSalt,
+						encryptedSecretSeed,
+						swarmEncryptionKey,
+						encryptionScheme: 'eip712',
+						walletProvider: 'para',
 					})
 				}
 			}
@@ -384,6 +430,11 @@
 						{#if !existingAccount}
 							A second signature creates your local account record.
 						{/if}
+					</Typography>
+				{:else if accountType === 'para'}
+					<Typography variant="small" style="color: var(--colors-medium)">
+						Your Para session will be used to decrypt the backup. Make sure you are signed in to
+						Para before proceeding.
 					</Typography>
 				{:else if accountType === 'passkey'}
 					{#if !useMnemonicForPasskey}

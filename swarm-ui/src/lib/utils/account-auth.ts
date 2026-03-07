@@ -1,6 +1,7 @@
 import type { Account } from '$lib/types'
 import { authenticateWithPasskey } from '$lib/passkey'
 import { connectAndSign, deriveEncryptionSeed } from '$lib/ethereum'
+import { deriveEncryptionSeedWithPara, ParaSessionExpiredError } from '$lib/para'
 import {
 	decryptMasterKey,
 	deriveEncryptionKey,
@@ -9,6 +10,8 @@ import {
 import { authenticateAgentAccount } from '$lib/agent-account'
 import { keccak256 } from 'ethers'
 import { Bytes } from '@ethersphere/bee-js'
+
+export { ParaSessionExpiredError }
 
 /**
  * Error thrown when an agent account requires seed phrase authentication.
@@ -55,8 +58,16 @@ export async function getMasterKeyFromAccount(account: Account): Promise<Bytes> 
 		// Agent accounts require the caller to collect the seed phrase via UI
 		throw new SeedPhraseRequiredError(account.id.toString())
 	} else {
-		// ethereum account — scheme determines how the masterKey was encrypted
-		if (account.encryptionScheme === 'eip712') {
+		// ethereum account — provider and scheme determine how to authenticate
+		if (account.walletProvider === 'para') {
+			// Para MPC wallet: sign via Para SDK, always eip712 scheme
+			const encryptionSeed = await deriveEncryptionSeedWithPara()
+			const encryptionKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+				encryptionSeed,
+				account.encryptionSalt,
+			)
+			return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
+		} else if (account.encryptionScheme === 'eip712') {
 			// Current scheme: EIP-712 fixed-nonce signature → keccak256 → HKDF
 			const encryptionSeed = await deriveEncryptionSeed()
 			const encryptionKey = await deriveMasterKeyEncryptionKeyFromEIP712(

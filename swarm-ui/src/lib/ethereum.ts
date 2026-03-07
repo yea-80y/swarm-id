@@ -197,9 +197,9 @@ export async function connectAndSign(): Promise<SignedMessage> {
  * produces a deterministic signature, which keccak256-hashes to a 32-byte seed.
  * HKDF with different info strings derives independent keys from this seed.
  */
-const ENCRYPTION_DOMAIN = { name: 'Swarm ID', version: '1' } as const
+export const ENCRYPTION_DOMAIN = { name: 'Swarm ID', version: '1' } as const
 
-const ENCRYPTION_TYPES = {
+export const ENCRYPTION_TYPES = {
 	DeriveEncryptionKey: [
 		{ name: 'purpose', type: 'string' },
 		{ name: 'address', type: 'address' },
@@ -207,7 +207,7 @@ const ENCRYPTION_TYPES = {
 	],
 }
 
-const ENCRYPTION_NONCE = 'SWARM-ID-ENCRYPTION-V1'
+export const ENCRYPTION_NONCE = 'SWARM-ID-ENCRYPTION-V1'
 
 /**
  * Connect wallet and sign EIP-712 to derive a deterministic encryption seed.
