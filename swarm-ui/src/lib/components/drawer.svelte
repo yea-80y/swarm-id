@@ -10,6 +10,18 @@
 	import IdentityList from '$lib/components/identity-list.svelte'
 	import CreateIdentityButton from '$lib/components/create-identity-button.svelte'
 	import { notImplemented } from '$lib/utils/not-implemented'
+	import { connectAndSign, deriveEncryptionSeed } from '$lib/ethereum'
+	import {
+		deriveEncryptionKey,
+		deriveSecretSeedEncryptionKey,
+		decryptMasterKey,
+		decryptSecretSeed,
+		generateEncryptionSalt,
+		deriveMasterKeyEncryptionKeyFromEIP712,
+		deriveSecretSeedEncryptionKeyFromEIP712,
+		encryptMasterKey,
+		encryptSecretSeed,
+	} from '$lib/utils/encryption'
 	import {
 		Add,
 		Checkmark,
@@ -20,6 +32,7 @@
 		IbmCloudHyperProtectCryptoServices,
 		Information,
 		Rocket,
+		Security,
 		TrashCan,
 	} from 'carbon-icons-svelte'
 	import { identitiesStore } from '$lib/stores/identities.svelte'
@@ -58,6 +71,9 @@
 	let networkSettingsModalOpen = $state(false)
 	let showGenerationDetailsModal = $state(false)
 	let showBackupModal = $state(false)
+	let isMigrating = $state(false)
+	let migrationError = $state<string | undefined>(undefined)
+	let migrationDone = $state(false)
 
 	$effect(() => {
 		accountName = account.name
@@ -117,6 +133,54 @@
 
 	function onAccountNameChange() {
 		accountsStore.setAccountName(account.id, accountName)
+	}
+
+	async function handleMigrateToEIP712() {
+		if (account.type !== 'ethereum' || account.encryptionScheme === 'eip712') return
+		try {
+			isMigrating = true
+			migrationError = undefined
+
+			// Step 1: SIWE — decrypt old masterKey (publicKey-based scheme)
+			const signed = await connectAndSign()
+			const oldMasterKeyKey = await deriveEncryptionKey(signed.publicKey, account.encryptionSalt)
+			const masterKey = await decryptMasterKey(account.encryptedMasterKey, oldMasterKeyKey)
+
+			// Step 2: Decrypt old secretSeed (v1: HKDF(masterKey, "swarm-id-secretseed-encryption-v1"))
+			const oldSeedKey = await deriveSecretSeedEncryptionKey(masterKey)
+			const secretSeed = await decryptSecretSeed(account.encryptedSecretSeed, oldSeedKey)
+
+			// Step 3: EIP-712 — derive new deterministic encryption seed
+			const encryptionSeed = await deriveEncryptionSeed()
+			const newEncryptionSalt = generateEncryptionSalt()
+
+			// Step 4: Re-encrypt both with EIP-712 scheme
+			const masterKeyEncKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+				encryptionSeed,
+				newEncryptionSalt,
+			)
+			const newEncryptedMasterKey = await encryptMasterKey(masterKey, masterKeyEncKey)
+
+			const secretSeedEncKey = await deriveSecretSeedEncryptionKeyFromEIP712(
+				encryptionSeed,
+				newEncryptionSalt,
+			)
+			const newEncryptedSecretSeed = await encryptSecretSeed(secretSeed, secretSeedEncKey)
+
+			// Step 5: Persist updated account
+			accountsStore.upgradeEthereumAccountEncryption(
+				account.id,
+				newEncryptedMasterKey,
+				newEncryptedSecretSeed,
+				newEncryptionSalt,
+			)
+
+			migrationDone = true
+		} catch (err) {
+			migrationError = err instanceof Error ? err.message : 'Upgrade failed. Please try again.'
+		} finally {
+			isMigrating = false
+		}
 	}
 </script>
 
@@ -405,6 +469,40 @@
 							<IbmCloudHyperProtectCryptoServices size={20} />
 							View Generation Details
 						</Button>
+						{#if account.encryptionScheme !== 'eip712'}
+							{#if !migrationDone}
+								<div class="security-warning">
+									<Vertical --vertical-gap="var(--quarter-padding)">
+										<Typography variant="small">
+											<strong>Security upgrade available.</strong> Your account uses an older encryption
+											scheme. Upgrading protects against attackers who know your wallet's public key.
+										</Typography>
+										{#if migrationError}
+											<Typography variant="small" style="color: var(--colors-red)"
+												>{migrationError}</Typography
+											>
+										{/if}
+										<Button
+											dimension="compact"
+											onclick={handleMigrateToEIP712}
+											disabled={isMigrating}
+										>
+											<Security size={20} />
+											{isMigrating ? 'Upgrading…' : 'Upgrade account security'}
+										</Button>
+										<Typography variant="small" style="color: var(--colors-medium)">
+											Requires two wallet signatures (SIWE + EIP-712).
+										</Typography>
+									</Vertical>
+								</div>
+							{:else}
+								<div class="security-ok">
+									<Typography variant="small">
+										<strong>Security upgraded.</strong> Account now uses EIP-712 encryption.
+									</Typography>
+								</div>
+							{/if}
+						{/if}
 					{/if}
 					<Button
 						variant="ghost"
@@ -504,5 +602,19 @@
 		overflow-y: auto;
 		z-index: 50;
 		box-shadow: 0px 4px 12px 4px var(--colors-dark-25);
+	}
+
+	.security-warning {
+		padding: var(--half-padding);
+		border: 1px solid var(--colors-warning, #f59e0b);
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--colors-warning, #f59e0b) 8%, transparent);
+	}
+
+	.security-ok {
+		padding: var(--half-padding);
+		border: 1px solid var(--colors-green, #22c55e);
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--colors-green, #22c55e) 8%, transparent);
 	}
 </style>

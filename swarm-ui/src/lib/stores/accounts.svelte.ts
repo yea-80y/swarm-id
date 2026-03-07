@@ -1,5 +1,5 @@
 import { browser } from '$app/environment'
-import { EthAddress, BatchId } from '@ethersphere/bee-js'
+import { EthAddress, BatchId, Bytes } from '@ethersphere/bee-js'
 import { createAccountsStorageManager, type Account } from '@swarm-id/lib'
 
 // ============================================================================
@@ -45,6 +45,25 @@ export const accountsStore = {
 
 	setAccountName(id: EthAddress, name: string) {
 		accounts = accounts.map((account) => (account.id.equals(id) ? { ...account, name } : account))
+		saveAccounts(accounts)
+	},
+
+	upgradeEthereumAccountEncryption(
+		id: EthAddress,
+		encryptedMasterKey: Bytes,
+		encryptedSecretSeed: Bytes,
+		encryptionSalt: Bytes,
+	) {
+		accounts = accounts.map((account) => {
+			if (!account.id.equals(id) || account.type !== 'ethereum') return account
+			return {
+				...account,
+				encryptedMasterKey,
+				encryptedSecretSeed,
+				encryptionSalt,
+				encryptionScheme: 'eip712' as const,
+			}
+		})
 		saveAccounts(accounts)
 	},
 
