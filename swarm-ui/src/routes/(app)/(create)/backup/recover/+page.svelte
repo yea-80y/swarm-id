@@ -32,9 +32,9 @@
 	} from '$lib/agent-account'
 	import {
 		generateEncryptionSalt,
-		deriveEncryptionKey,
+		deriveMasterKeyEncryptionKeyFromEIP712,
 		encryptMasterKey,
-		deriveSecretSeedEncryptionKey,
+		deriveSecretSeedEncryptionKeyFromEIP712,
 		encryptSecretSeed,
 	} from '$lib/utils/encryption'
 	import { deriveAccountSwarmEncryptionKey } from '@swarm-id/lib'
@@ -59,6 +59,7 @@
 	let recoveredMasterKey = $state<Bytes | undefined>(undefined) // passkey + agent (not ethereum)
 	let recoveredCredentialId = $state<string | undefined>(undefined) // passkey only
 	let recoveredAddress = $state<EthAddress | undefined>(undefined)
+	let recoveredEncryptionSeed = $state<Uint8Array | undefined>(undefined) // ethereum only — reused in restore
 
 	const hashValid = $derived(/^[0-9a-fA-F]{64}$/.test(hash.trim()))
 	const wordCount = $derived(countSeedPhraseWords(seedPhrase))
@@ -101,6 +102,7 @@
 			recoveredMasterKey = undefined
 			recoveredCredentialId = undefined
 			recoveredAddress = undefined
+			recoveredEncryptionSeed = undefined
 
 			const bee = new Bee(networkSettingsStore.beeNodeUrl)
 			const trimmedHash = hash.trim()
@@ -109,6 +111,7 @@
 
 			if (accountType === 'ethereum') {
 				const entropy = await deriveEncryptionSeed()
+				recoveredEncryptionSeed = entropy
 				keypair = deriveBackupKeypair(entropy)
 				// masterAddress derived from payload after decryption
 			} else if (accountType === 'passkey') {
@@ -195,18 +198,32 @@
 						swarmEncryptionKey,
 					})
 				} else {
-					// ethereum: sign SIWE to re-encrypt masterKey into a proper account
+					// ethereum: sign SIWE for wallet address, reuse EIP-712 seed from decrypt phase
 					if (!payload.masterKeyHex) {
 						throw new Error('No master key in backup')
+					}
+					if (!recoveredEncryptionSeed) {
+						throw new Error('Encryption seed missing — try decrypting again')
 					}
 					const masterKey = new Bytes(payload.masterKeyHex)
 					const signed = await connectAndSign()
 					const encryptionSalt = generateEncryptionSalt()
-					const encryptionKey = await deriveEncryptionKey(signed.publicKey, encryptionSalt)
-					const encryptedMasterKey = await encryptMasterKey(masterKey, encryptionKey)
+
+					// Reuse the EIP-712 encryptionSeed from the decrypt phase.
+					// Same wallet — same deterministic seed — no extra wallet popup needed.
+					const masterKeyEncKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+						recoveredEncryptionSeed,
+						encryptionSalt,
+					)
+					const encryptedMasterKey = await encryptMasterKey(masterKey, masterKeyEncKey)
+
 					// secretSeed not in backup — encrypt empty placeholder (does not affect key recovery)
-					const secretSeedEncKey = await deriveSecretSeedEncryptionKey(masterKey)
+					const secretSeedEncKey = await deriveSecretSeedEncryptionKeyFromEIP712(
+						recoveredEncryptionSeed,
+						encryptionSalt,
+					)
 					const encryptedSecretSeed = await encryptSecretSeed('', secretSeedEncKey)
+
 					const swarmEncryptionKey = await deriveAccountSwarmEncryptionKey(masterKey.toHex())
 					account = accountsStore.addAccount({
 						id: recoveredAddress,
@@ -218,6 +235,7 @@
 						encryptionSalt,
 						encryptedSecretSeed,
 						swarmEncryptionKey,
+						encryptionScheme: 'eip712',
 					})
 				}
 			}

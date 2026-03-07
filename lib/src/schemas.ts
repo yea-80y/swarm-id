@@ -84,6 +84,10 @@ export const EthereumAccountSchemaV1 = z.object({
   swarmEncryptionKey: z.string().length(64), // NEW: derived encryption key for Swarm data (64-char hex)
   defaultPostageStampBatchID: StoredBatchId.optional(), // NEW: account default stamp
   feedSignerAddress: z.string().length(40).optional(), // HKDF-derived feed signer address
+  // Encryption scheme for encryptedMasterKey + encryptedSecretSeed.
+  // 'publickey' (legacy/absent): HKDF(SIWE_publicKey, salt) — vulnerable if publicKey is on-chain.
+  // 'eip712' (current):         HKDF(keccak256(EIP-712_sig), salt) — safe for any wallet.
+  encryptionScheme: z.enum(["publickey", "eip712"]).optional(),
 })
 
 /**

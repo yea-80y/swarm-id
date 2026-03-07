@@ -6,11 +6,17 @@
 	import Modal from '$lib/components/ui/modal.svelte'
 	import Input from '$lib/components/ui/input/input.svelte'
 	import { Close, View, ViewOff } from 'carbon-icons-svelte'
-	import { deriveSecretSeedEncryptionKey, decryptSecretSeed } from '$lib/utils/encryption'
+	import {
+		deriveEncryptionKey,
+		deriveSecretSeedEncryptionKey,
+		deriveMasterKeyEncryptionKeyFromEIP712,
+		deriveSecretSeedEncryptionKeyFromEIP712,
+		decryptMasterKey,
+		decryptSecretSeed,
+	} from '$lib/utils/encryption'
+	import { connectAndSign, deriveEncryptionSeed } from '$lib/ethereum'
 	import type { EthereumAccount } from '@swarm-id/lib'
 	import CopyButton from './copy-button.svelte'
-	import { type Bytes } from '@ethersphere/bee-js'
-	import { getMasterKeyFromAccount } from '$lib/utils/account-auth'
 
 	interface Props {
 		open: boolean
@@ -25,52 +31,49 @@
 	let secretSeed = $state('')
 	let error = $state<string | undefined>(undefined)
 	let isAuthenticating = $state(false)
-	let decryptedMasterKey: Bytes | undefined
 
-	async function handleAuthenticate() {
+	async function handleUnmask() {
 		if (!account) return
 
 		try {
 			open = false
 			drawerOpen = false
-
 			isAuthenticating = true
 			error = undefined
 
-			decryptedMasterKey = await getMasterKeyFromAccount(account)
+			if (account.encryptionScheme === 'eip712') {
+				// Current scheme: one EIP-712 popup decrypts both masterKey and secretSeed
+				const encryptionSeed = await deriveEncryptionSeed()
+				const masterKeyKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+					encryptionSeed,
+					account.encryptionSalt,
+				)
+				const seedKey = await deriveSecretSeedEncryptionKeyFromEIP712(
+					encryptionSeed,
+					account.encryptionSalt,
+				)
+				// masterKey not needed for display — only secretSeed is shown
+				await decryptMasterKey(account.encryptedMasterKey, masterKeyKey) // validates the signature decrypts correctly
+				secretSeed = await decryptSecretSeed(account.encryptedSecretSeed, seedKey)
+			} else {
+				// Legacy publickey scheme: SIWE → publicKey → v1 masterKey-based secretSeed decrypt
+				const signed = await connectAndSign()
+				const masterKeyKey = await deriveEncryptionKey(signed.publicKey, account.encryptionSalt)
+				const decryptedMasterKey = await decryptMasterKey(account.encryptedMasterKey, masterKeyKey)
+				const seedKey = await deriveSecretSeedEncryptionKey(decryptedMasterKey)
+				secretSeed = await decryptSecretSeed(account.encryptedSecretSeed, seedKey)
+			}
 
-			console.log('✅ Authentication successful')
+			isUnmasked = true
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Authentication failed'
-			console.error('❌ Authentication failed:', err)
+			error =
+				err instanceof Error
+					? err.message
+					: 'Authentication failed or secret seed could not be decrypted'
 		} finally {
 			isAuthenticating = false
 			open = true
 			drawerOpen = true
-		}
-	}
-
-	async function handleUnmask() {
-		if (!decryptedMasterKey) {
-			await handleAuthenticate()
-		}
-
-		try {
-			if (decryptedMasterKey) {
-				console.log('🔓 Decrypting secret seed...')
-
-				// Derive encryption key from master key
-				const secretSeedEncryptionKey = await deriveSecretSeedEncryptionKey(decryptedMasterKey)
-
-				// Decrypt secret seed
-				secretSeed = await decryptSecretSeed(account.encryptedSecretSeed, secretSeedEncryptionKey)
-
-				isUnmasked = true
-				console.log('✅ Secret seed decrypted')
-			}
-		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to decrypt secret seed'
-			console.error('❌ Failed to decrypt secret seed:', err)
 		}
 	}
 
@@ -82,7 +85,6 @@
 	function handleClose() {
 		isUnmasked = false
 		secretSeed = ''
-		decryptedMasterKey = undefined
 		error = undefined
 		onClose()
 	}

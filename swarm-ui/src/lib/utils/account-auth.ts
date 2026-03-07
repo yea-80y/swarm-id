@@ -1,7 +1,11 @@
 import type { Account } from '$lib/types'
 import { authenticateWithPasskey } from '$lib/passkey'
-import { connectAndSign } from '$lib/ethereum'
-import { decryptMasterKey, deriveEncryptionKey } from '$lib/utils/encryption'
+import { connectAndSign, deriveEncryptionSeed } from '$lib/ethereum'
+import {
+	decryptMasterKey,
+	deriveEncryptionKey,
+	deriveMasterKeyEncryptionKeyFromEIP712,
+} from '$lib/utils/encryption'
 import { authenticateAgentAccount } from '$lib/agent-account'
 import { keccak256 } from 'ethers'
 import { Bytes } from '@ethersphere/bee-js'
@@ -51,8 +55,21 @@ export async function getMasterKeyFromAccount(account: Account): Promise<Bytes> 
 		// Agent accounts require the caller to collect the seed phrase via UI
 		throw new SeedPhraseRequiredError(account.id.toString())
 	} else {
-		const signed = await connectAndSign()
-		const encryptionKey = await deriveEncryptionKey(signed.publicKey, account.encryptionSalt)
-		return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
+		// ethereum account — scheme determines how the masterKey was encrypted
+		if (account.encryptionScheme === 'eip712') {
+			// Current scheme: EIP-712 fixed-nonce signature → keccak256 → HKDF
+			const encryptionSeed = await deriveEncryptionSeed()
+			const encryptionKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+				encryptionSeed,
+				account.encryptionSalt,
+			)
+			return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
+		} else {
+			// Legacy publickey scheme: HKDF(SIWE_publicKey, salt)
+			// Works for old accounts. Migrate to eip712 via account settings when convenient.
+			const signed = await connectAndSign()
+			const encryptionKey = await deriveEncryptionKey(signed.publicKey, account.encryptionSalt)
+			return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
+		}
 	}
 }

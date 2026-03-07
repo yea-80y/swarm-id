@@ -15,14 +15,14 @@
 	import Tooltip from '$lib/components/ui/tooltip.svelte'
 	import ErrorMessage from '$lib/components/ui/error-message.svelte'
 	import GenerateSeedModal from '$lib/components/generate-seed-modal.svelte'
-	import { connectAndSign, deriveMasterKey } from '$lib/ethereum'
+	import { connectAndSign, deriveMasterKey, deriveEncryptionSeed } from '$lib/ethereum'
 	import { sessionStore } from '$lib/stores/session.svelte'
 	import { accountsStore } from '$lib/stores/accounts.svelte'
 	import {
 		generateEncryptionSalt,
-		deriveEncryptionKey,
+		deriveMasterKeyEncryptionKeyFromEIP712,
 		encryptMasterKey,
-		deriveSecretSeedEncryptionKeyFromSIWE,
+		deriveSecretSeedEncryptionKeyFromEIP712,
 		encryptSecretSeed,
 	} from '$lib/utils/encryption'
 	import { validateSecretSeed } from '$lib/utils/secret-seed'
@@ -79,66 +79,49 @@
 			error = undefined
 			console.log('🔐 Connecting to Ethereum wallet...')
 
-			// Connect wallet and sign SIWE message
+			// Step 1: Connect wallet and sign SIWE — recovers publicKey for masterKey derivation
 			const signed = await connectAndSign()
 
-			console.log('✅ Wallet connected and message signed')
-			console.log('📍 Wallet address:', signed.address)
+			// Step 2: Sign EIP-712 fixed-nonce message — deterministic encryption seed.
+			// Encryption key = HKDF(keccak256(EIP-712_sig), salt). Knowing the wallet's
+			// public key (e.g. from on-chain txs) cannot reproduce the signature, so an
+			// attacker with localStorage cannot derive the decryption key.
+			const encryptionSeed = await deriveEncryptionSeed()
 
 			const { masterKey, masterAddress } = deriveMasterKey(secretSeed, signed.publicKey)
-
-			// Derive swarmEncryptionKey from master key
 			const swarmEncryptionKey = await deriveAccountSwarmEncryptionKey(masterKey.toHex())
-			console.log('🔑 SwarmEncryptionKey derived')
-
-			// Encrypt masterKey before storage
-			console.log('🔒 Encrypting masterKey...')
-
-			// Step 2: Generate encryption salt
 			const encryptionSalt = generateEncryptionSalt()
-			console.log('🎲 Encryption salt generated')
 
-			// Step 3: Derive encryption key from public key + salt
-			const encryptionKey = await deriveEncryptionKey(signed.publicKey, encryptionSalt)
-			console.log('🔑 Encryption key derived')
-
-			// Step 4: Encrypt masterKey
-			const encryptedMasterKey = await encryptMasterKey(masterKey, encryptionKey)
-			console.log('✅ MasterKey encrypted')
-
-			// Step 5: Encrypt secretSeed with SIWE public key (v2 scheme — wallet can decrypt without masterKey)
-			const secretSeedEncryptionKey = await deriveSecretSeedEncryptionKeyFromSIWE(
-				signed.publicKey,
+			const masterKeyEncKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+				encryptionSeed,
 				encryptionSalt,
 			)
-			const encryptedSecretSeed = await encryptSecretSeed(secretSeed, secretSeedEncryptionKey)
-			console.log('✅ Secret seed encrypted with SIWE key (v2)')
+			const encryptedMasterKey = await encryptMasterKey(masterKey, masterKeyEncKey)
 
-			// Store account with encrypted masterKey, encrypted secret seed, and feed signer address
+			const secretSeedEncKey = await deriveSecretSeedEncryptionKeyFromEIP712(
+				encryptionSeed,
+				encryptionSalt,
+			)
+			const encryptedSecretSeed = await encryptSecretSeed(secretSeed, secretSeedEncKey)
+
 			const newAccount = accountsStore.addAccount({
 				id: masterAddress,
 				createdAt: Date.now(),
 				name: accountName.trim(),
 				type: 'ethereum',
 				ethereumAddress: new EthAddress(signed.address),
-				encryptedMasterKey: encryptedMasterKey,
-				encryptionSalt: encryptionSalt,
-				encryptedSecretSeed: encryptedSecretSeed,
-				swarmEncryptionKey: swarmEncryptionKey,
+				encryptedMasterKey,
+				encryptionSalt,
+				encryptedSecretSeed,
+				swarmEncryptionKey,
+				encryptionScheme: 'eip712',
 			})
 			sessionStore.setAccount(newAccount)
 			sessionStore.setSyncedCreation(accountType === 'synced')
-
-			// Keep unencrypted masterKey in session temporarily for identity creation
 			sessionStore.setTemporaryMasterKey(masterKey)
-			console.log('🔑 MasterKey stored in session (temporary)')
-
-			// Navigate to identity creation page
 			goto(resolve(routes.IDENTITY_NEW))
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to connect wallet'
-			console.error('❌ Wallet connection failed:', err)
-			console.error(error)
 			isProcessing = false
 		}
 	}
@@ -291,11 +274,6 @@
 						>{#if !isProcessing}<ArrowRight size={20} />{/if}</span
 					>
 				</Button>
-				{#if !isFormDisabled}
-					<Typography variant="small"
-						>For security, use a fresh Ethereum wallet without existing onchain activity.</Typography
-					>
-				{/if}
 			</Vertical>
 		{/snippet}
 	</CreationLayout>

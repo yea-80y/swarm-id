@@ -134,43 +134,66 @@ export async function decryptMasterKey(
 }
 
 // ============================================================================
-// Secret Seed Encryption v2 — derived from SIWE public key (not masterKey)
+// Master Key Encryption v2 + Secret Seed Encryption v3 — EIP-712 based
+//
+// Both use the same 32-byte encryptionSeed (output of deriveEncryptionSeed() in
+// ethereum.ts: keccak256 of an EIP-712 fixed-nonce signature). Different HKDF
+// info strings produce independent keys from the same seed.
+//
+// Why this is secure: the EIP-712 signature requires the wallet's private key.
+// An attacker who knows only the wallet's public key (e.g. from on-chain txs)
+// cannot reproduce the signature and therefore cannot derive the encryption key.
+// This closes the vulnerability present in the v1/v2 publicKey-based schemes.
 // ============================================================================
 
 /**
- * Derive encryption key for secretSeed from the SIWE public key + encryption salt.
+ * Derive AES-GCM key for encrypting masterKey from an EIP-712 encryption seed.
  *
- * Uses the same root material as deriveEncryptionKey (SIWE publicKey + salt) but
- * a different HKDF info string for domain separation. This breaks the circular
- * dependency where secretSeed was previously encrypted with a masterKey-derived key:
- *
- *   Old (v1): secretSeed → masterKey → encryptionKey → encryptedSecretSeed  (circular)
- *   New (v2): wallet SIWE → publicKey → HKDF(info=v2) → encryptionKey → encryptedSecretSeed
- *
- * Recovery benefit: wallet alone can decrypt secretSeed via SIWE, then
- * secretSeed + wallet can re-derive masterKey — no Swarm backup needed.
- *
- * @param publicKey - Hex string of ECDSA public key (from SIWE signature)
- * @param salt - Encryption salt stored with the account (same as masterKey encryption)
- * @returns CryptoKey for AES-GCM encryption/decryption of secretSeed
+ * @param encryptionSeed - 32-byte seed from keccak256(EIP-712 signature)
+ * @param salt - Random salt stored alongside the encrypted account (same salt used for v3)
  */
-export async function deriveSecretSeedEncryptionKeyFromSIWE(
-	publicKey: string,
+export async function deriveMasterKeyEncryptionKeyFromEIP712(
+	encryptionSeed: Uint8Array,
 	salt: Bytes | string,
 ): Promise<CryptoKey> {
-	const publicKeyBytes = new Bytes(publicKey).toUint8Array()
 	const saltBytes = salt instanceof Bytes ? salt.toUint8Array() : new Bytes(salt).toUint8Array()
-
-	const keyMaterial = await crypto.subtle.importKey('raw', publicKeyBytes, 'HKDF', false, [
+	const keyMaterial = await crypto.subtle.importKey('raw', encryptionSeed, 'HKDF', false, [
 		'deriveKey',
 	])
-
 	return crypto.subtle.deriveKey(
 		{
 			name: 'HKDF',
 			salt: saltBytes,
 			hash: 'SHA-256',
-			info: new TextEncoder().encode('swarm-id-secretseed-encryption-v2'),
+			info: new TextEncoder().encode('swarm-id-masterkey-encryption-v2'),
+		},
+		keyMaterial,
+		{ name: 'AES-GCM', length: 256 },
+		false,
+		['encrypt', 'decrypt'],
+	)
+}
+
+/**
+ * Derive AES-GCM key for encrypting secretSeed from an EIP-712 encryption seed.
+ *
+ * @param encryptionSeed - 32-byte seed from keccak256(EIP-712 signature)
+ * @param salt - Random salt stored alongside the encrypted account (same salt used for v2)
+ */
+export async function deriveSecretSeedEncryptionKeyFromEIP712(
+	encryptionSeed: Uint8Array,
+	salt: Bytes | string,
+): Promise<CryptoKey> {
+	const saltBytes = salt instanceof Bytes ? salt.toUint8Array() : new Bytes(salt).toUint8Array()
+	const keyMaterial = await crypto.subtle.importKey('raw', encryptionSeed, 'HKDF', false, [
+		'deriveKey',
+	])
+	return crypto.subtle.deriveKey(
+		{
+			name: 'HKDF',
+			salt: saltBytes,
+			hash: 'SHA-256',
+			info: new TextEncoder().encode('swarm-id-secretseed-encryption-v3'),
 		},
 		keyMaterial,
 		{ name: 'AES-GCM', length: 256 },

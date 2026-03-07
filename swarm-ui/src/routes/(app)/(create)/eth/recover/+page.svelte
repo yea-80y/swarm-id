@@ -12,13 +12,13 @@
 	import routes from '$lib/routes'
 	import { sessionStore } from '$lib/stores/session.svelte'
 	import { accountsStore } from '$lib/stores/accounts.svelte'
-	import { connectAndSign, deriveMasterKey } from '$lib/ethereum'
+	import { connectAndSign, deriveMasterKey, deriveEncryptionSeed } from '$lib/ethereum'
 	import { validateSecretSeed } from '$lib/utils/secret-seed'
 	import {
 		generateEncryptionSalt,
-		deriveEncryptionKey,
+		deriveMasterKeyEncryptionKeyFromEIP712,
 		encryptMasterKey,
-		deriveSecretSeedEncryptionKeyFromSIWE,
+		deriveSecretSeedEncryptionKeyFromEIP712,
 		encryptSecretSeed,
 	} from '$lib/utils/encryption'
 	import { deriveAccountSwarmEncryptionKey } from '@swarm-id/lib'
@@ -52,18 +52,22 @@
 			let account = accountsStore.accounts.find((a) => a.id.equals(masterAddress))
 
 			if (!account) {
-				// New device — reconstruct the full account record
+				// New device — reconstruct the full account record with EIP-712 encryption
+				const encryptionSeed = await deriveEncryptionSeed()
 				const encryptionSalt = generateEncryptionSalt()
-				const encryptionKey = await deriveEncryptionKey(signed.publicKey, encryptionSalt)
-				const encryptedMasterKey = await encryptMasterKey(masterKey, encryptionKey)
 
-				// Encrypt secretSeed with v2 scheme: SIWE public key → HKDF (not masterKey)
-				// This lets the wallet alone decrypt secretSeed without knowing masterKey first
-				const secretSeedEncKey = await deriveSecretSeedEncryptionKeyFromSIWE(
-					signed.publicKey,
+				const masterKeyEncKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+					encryptionSeed,
+					encryptionSalt,
+				)
+				const encryptedMasterKey = await encryptMasterKey(masterKey, masterKeyEncKey)
+
+				const secretSeedEncKey = await deriveSecretSeedEncryptionKeyFromEIP712(
+					encryptionSeed,
 					encryptionSalt,
 				)
 				const encryptedSecretSeed = await encryptSecretSeed(secretSeed, secretSeedEncKey)
+
 				const swarmEncryptionKey = await deriveAccountSwarmEncryptionKey(masterKey.toHex())
 
 				account = accountsStore.addAccount({
@@ -76,6 +80,7 @@
 					encryptionSalt,
 					encryptedSecretSeed,
 					swarmEncryptionKey,
+					encryptionScheme: 'eip712',
 				})
 			}
 
