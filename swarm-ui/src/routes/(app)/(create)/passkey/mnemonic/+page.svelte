@@ -34,6 +34,7 @@
 	})
 
 	function handleSkip() {
+		if (!confirmed) return
 		goto(resolve(routes.IDENTITY_NEW))
 	}
 
@@ -73,24 +74,19 @@
 {#if mnemonic}
 	<CreationLayout
 		title="Save your recovery phrase"
-		description="Optional — your passkey already works on any new device automatically"
+		description="Your only safety net if you ever lose all your passkeys"
 		onClose={() => goto(resolve(routes.HOME))}
 	>
 		{#snippet content()}
 			<Vertical --vertical-gap="var(--padding)">
 				<Typography>
-					<strong>You don't need this to use swarm-id on a new device.</strong> Your passkey syncs
-					automatically via Google Password Manager, iCloud Keychain, or your hardware key — just
-					sign in on the new device and everything works.
+					This phrase is the <strong>only way to recover your account</strong> if you permanently
+					lose your passkey — all devices lost, cloud account deleted, or hardware key destroyed.
+					Without it, that scenario means permanent, unrecoverable loss of your Swarm identity.
 					<br /><br />
-					This phrase has two uses. First, it's a last-resort recovery if you permanently lose your passkey
-					(all devices lost, cloud account deleted). Second, and importantly,
-					<strong
-						>it's the only way to hold your feed signer keys independently of Google, Apple, or your
-						hardware key.</strong
-					>
-					Without it, your ability to write to Swarm is tied entirely to your passkey provider. With it,
-					you can re-derive your keys anywhere using standard BIP-39 tools.
+					It also lets you hold your keys independently: with this phrase you can re-derive everything
+					using any standard BIP-39 tool, without relying on Google, Apple, or a hardware key. For day-to-day
+					use on a new device your passkey syncs automatically and this phrase is not needed.
 					<strong>Never share these words with anyone.</strong>
 				</Typography>
 
@@ -119,7 +115,8 @@
 				<!-- Confirmation checkbox -->
 				<Checkbox bind:checked={confirmed} dimension="compact">
 					<Typography variant="small"
-						>I understand this is optional backup only — my passkey already syncs across devices.</Typography
+						>I understand: without this phrase, losing all my passkeys means my account cannot be
+						recovered.</Typography
 					>
 				</Checkbox>
 
@@ -150,7 +147,7 @@
 					disabled={isStoring}
 					class="mobile-full-width"
 				>
-					Skip — my passkey syncs automatically
+					Skip without saving (not recommended)
 				</Button>
 			</Vertical>
 		{/snippet}
