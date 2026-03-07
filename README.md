@@ -77,10 +77,15 @@ masterKey bytes → Mnemonic.fromEntropy() → 24 words
 1. User creates passkey account → biometric prompt
 2. **New:** User lands on mnemonic page showing 24 words in a numbered grid
 3. Copy button available; warning box displayed ("never enter this anywhere")
-4. Confirmation checkbox gates the continue button
-5. On confirm: backup stored to IndexedDB → navigate to identity creation as before
+4. Confirmation checkbox is required before proceeding; labelled honestly: *"I understand: without this phrase, losing all my passkeys means my account cannot be recovered"*
+5. Skip button exists but is labelled "Skip without saving (not recommended)" and requires confirming the checkbox first
+6. On confirm: backup stored to IndexedDB → navigate to identity creation as before
 
-**Recovery:** `/passkey/recover` route — enter 24 words, re-derive master key, look up account by derived Ethereum address, restore session identically to a successful passkey auth.
+**Recovery paths:**
+
+- `/passkey/recover` — enter 24 words, re-derive master key, look up account by derived Ethereum address, attempt passkey auth to verify PRF match, restore session. **Requires a synced passkey** (iCloud/Google Password Manager) on the current device.
+
+- `/backup/recover` (mnemonic path) — if *all* passkeys are gone (worst case), the user can toggle "All my passkeys are gone — use recovery phrase" on the Swarm backup restore page. This derives the master key from the mnemonic without requiring a passkey, restores identity metadata from the Swarm backup, and creates an account record with a placeholder credential ID. The user should register a new passkey afterwards.
 
 **Related upstream issue:** [#191](https://github.com/snaha/swarm-id/issues/191)
 
@@ -110,7 +115,45 @@ after:  uploadEncryptedDataWithSigning(context, data, swarmEncryptionKey)  ← e
 
 ---
 
-### 5. User-Owned Feed Writes — BIP-44 Feed Signer (Phase 3)
+### 5. Ethereum Account Encryption v3 — EIP-712 Based (closes #85)
+
+**Files:**
+- `swarm-ui/src/lib/ethereum.ts` — `deriveEncryptionSeed()` EIP-712 fixed-nonce signing
+- `swarm-ui/src/lib/utils/encryption.ts` — HKDF-based key derivation + AES-GCM encrypt/decrypt
+- `swarm-ui/src/lib/stores/accounts.svelte.ts` — `upgradeEthereumAccountEncryption()`
+- `swarm-ui/src/lib/components/drawer.svelte` — migration UI
+
+[#85](https://github.com/snaha/swarm-id/issues/85) describes a realistic attack against the upstream encryption scheme: the encryption key for `encryptedMasterKey` and `encryptedSecretSeed` was derived from the user's *public* key — which is often visible on-chain (any transaction from that wallet exposes it). An attacker who reads localStorage and knows the public key can decrypt the master key.
+
+**What changed:**
+
+The encryption key is now derived from an **EIP-712 signature** using a fixed nonce:
+
+```
+EIP-712 sign({ purpose: "swarm-id/backup-encryption/v1", nonce: "fixed" })
+  → keccak256(signature bytes)
+  → HKDF("swarm-id/master-key-encryption/v1" or "swarm-id/secretseed-encryption/v2")
+  → AES-GCM encryption key
+```
+
+The signature requires the wallet's **private key** to produce — not available from on-chain data. The nonce is fixed so the key is always re-derivable without storing anything extra.
+
+> **SIWE is still used for key *derivation*.** `masterKey = keccak256(keccak256(secretSeed) + SIWE_publicKey)` is unchanged. What v3 changes is encryption *at rest* only — the two operations are independent.
+
+**Migration UI:**
+
+Existing accounts encrypted under the old scheme show a security warning in Account Details (drawer) with an "Upgrade account security" button. The migration flow:
+
+1. SIWE sign → decrypt `encryptedMasterKey` and `encryptedSecretSeed` using the old public-key scheme
+2. EIP-712 sign → derive new encryption seed (independent of secretSeed)
+3. Re-encrypt both values with the new key + fresh salt
+4. Update account record in localStorage with `encryptionScheme: 'eip712'`
+
+**Related upstream issue:** [#85](https://github.com/snaha/swarm-id/issues/85)
+
+---
+
+### 6. User-Owned Feed Writes — BIP-44 Feed Signer (Phase 3)
 
 **Files:**
 - `lib/src/utils/feed-signer.ts` — `deriveBip44FeedSigner()` BIP-44 key derivation
@@ -179,7 +222,7 @@ pnpm dev:swarm-ui   # http://localhost:5174
 
 | Phase | Status | Description |
 |---|---|---|
-| 1 — Fork fixes + recovery | ✅ Complete | PRF salt, iOS postMessage, BIP-39 mnemonic, uploadFile encryption, ETH/passkey/backup recovery UIs, sign-in page |
+| 1 — Fork fixes + recovery | ✅ Complete | PRF salt, iOS postMessage, BIP-39 mnemonic (honest framing + catastrophic recovery path), uploadFile encryption, ETH/passkey/backup recovery UIs, sign-in page, EIP-712 account encryption v3 (closes #85) + migration UI |
 | 2 — Identity-level feed signers | ✅ Complete | Per-identity BIP-44 feed signer (consistent address across apps), key export, identity-level feed addresses |
 | 3 — User-owned feed writes | ✅ Complete | makeUserEpochFeedWriter(), identity feed signer stays in proxy (never sent to parent), BIP-44 derived |
 | 4 — Swarm account backup | ✅ Complete | ECIES backup encryption, backup creation UI, backup restore UI for all 3 account types |
