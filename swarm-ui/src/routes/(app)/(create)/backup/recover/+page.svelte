@@ -24,7 +24,8 @@
 	import { readAccountBackup } from '$lib/utils/account-backup'
 	import type { BackupPayload } from '$lib/utils/account-backup'
 	import { deriveEncryptionSeed, connectAndSign } from '$lib/ethereum'
-	import { authenticateWithPasskey } from '$lib/passkey'
+	import { authenticateWithPasskey, createEthereumWalletFromSeed } from '$lib/passkey'
+	import { mnemonicToMasterKey } from '$lib/utils/passkey-mnemonic'
 	import {
 		deriveFromSeedPhrase,
 		validateSeedPhrase,
@@ -52,6 +53,9 @@
 	let hash = $state('')
 	let accountType = $state<AccountTypeOption>('ethereum')
 	let seedPhrase = $state('')
+	let useMnemonicForPasskey = $state(false) // catastrophic recovery: mnemonic instead of passkey
+	let passkeyMnemonic = $state('')
+	let needsPasskeyRegistration = $state(false) // set after mnemonic-based restore (no credentialId)
 	let error = $state<string | undefined>(undefined)
 
 	// Held in memory between decrypt step and restore step
@@ -70,8 +74,16 @@
 		return validateSeedPhrase(seedPhrase).valid && wordCount >= 12
 	})
 
+	const passkeyMnemonicWordCount = $derived(
+		passkeyMnemonic.trim().split(/\s+/).filter(Boolean).length,
+	)
+	const passkeyMnemonicValid = $derived(passkeyMnemonicWordCount === 24)
+
 	const canDecrypt = $derived(
-		hashValid && (accountType !== 'agent' || seedPhraseValid) && phase === 'idle',
+		hashValid &&
+			(accountType !== 'agent' || seedPhraseValid) &&
+			(accountType !== 'passkey' || !useMnemonicForPasskey || passkeyMnemonicValid) &&
+			phase === 'idle',
 	)
 
 	const existingAccount = $derived.by(() => {
@@ -115,11 +127,21 @@
 				keypair = deriveBackupKeypair(entropy)
 				// masterAddress derived from payload after decryption
 			} else if (accountType === 'passkey') {
-				const result = await authenticateWithPasskey({ rpId: window.location.hostname })
-				recoveredMasterKey = result.masterKey
-				recoveredCredentialId = result.credentialId
-				recoveredAddress = result.ethereumAddress
-				keypair = deriveBackupKeypair(result.masterKey.toUint8Array())
+				if (useMnemonicForPasskey) {
+					// Catastrophic recovery: all passkeys gone — derive masterKey from mnemonic directly
+					const mk = mnemonicToMasterKey(passkeyMnemonic)
+					const { address } = createEthereumWalletFromSeed(mk.toUint8Array())
+					recoveredMasterKey = mk
+					recoveredAddress = address
+					// recoveredCredentialId stays undefined — no passkey available
+					keypair = deriveBackupKeypair(mk.toUint8Array())
+				} else {
+					const result = await authenticateWithPasskey({ rpId: window.location.hostname })
+					recoveredMasterKey = result.masterKey
+					recoveredCredentialId = result.credentialId
+					recoveredAddress = result.ethereumAddress
+					keypair = deriveBackupKeypair(result.masterKey.toUint8Array())
+				}
 			} else {
 				// agent
 				const result = deriveFromSeedPhrase(seedPhrase)
@@ -169,8 +191,8 @@
 
 			if (!account) {
 				if (accountType === 'passkey') {
-					if (!recoveredMasterKey || !recoveredCredentialId) {
-						throw new Error('Missing passkey credentials — try decrypting again')
+					if (!recoveredMasterKey) {
+						throw new Error('Missing master key — try decrypting again')
 					}
 					const swarmEncryptionKey = await deriveAccountSwarmEncryptionKey(
 						recoveredMasterKey.toHex(),
@@ -180,9 +202,13 @@
 						name: 'Recovered Account',
 						createdAt: Date.now(),
 						type: 'passkey',
-						credentialId: recoveredCredentialId,
+						// If recovered via mnemonic (no passkey), use a placeholder until user registers a new one
+						credentialId: recoveredCredentialId ?? 'mnemonic-recovery',
 						swarmEncryptionKey,
 					})
+					if (!recoveredCredentialId) {
+						needsPasskeyRegistration = true
+					}
 				} else if (accountType === 'agent') {
 					if (!recoveredMasterKey) {
 						throw new Error('Missing master key — try decrypting again')
@@ -360,10 +386,50 @@
 						{/if}
 					</Typography>
 				{:else if accountType === 'passkey'}
-					<Typography variant="small" style="color: var(--colors-medium)">
-						Your passkey will be used to decrypt the backup — the same credential you used when
-						creating the account.
-					</Typography>
+					{#if !useMnemonicForPasskey}
+						<Typography variant="small" style="color: var(--colors-medium)">
+							Your passkey will be used to decrypt the backup.
+						</Typography>
+						<Button
+							dimension="compact"
+							variant="ghost"
+							onclick={() => (useMnemonicForPasskey = true)}
+							disabled={phase === 'decrypting'}
+						>
+							All my passkeys are gone — use recovery phrase
+						</Button>
+					{:else}
+						<Vertical --vertical-gap="var(--quarter-padding)">
+							<Horizontal --horizontal-justify-content="space-between">
+								<Typography variant="small">Recovery phrase (24 words)</Typography>
+								<Typography variant="small" style="color: var(--colors-medium)">
+									{passkeyMnemonicWordCount} / 24
+								</Typography>
+							</Horizontal>
+							<textarea
+								class="phrase-input"
+								bind:value={passkeyMnemonic}
+								placeholder="Enter your 24-word recovery phrase separated by spaces…"
+								rows={3}
+								disabled={phase === 'decrypting'}
+							></textarea>
+							{#if passkeyMnemonic && !passkeyMnemonicValid}
+								<ErrorMessage>Must be exactly 24 words</ErrorMessage>
+							{/if}
+						</Vertical>
+						<Typography variant="small" style="color: var(--colors-medium)">
+							Your recovery phrase encodes your account key directly. After restore, register a new
+							passkey in Settings to enable future sign-in.
+						</Typography>
+						<Button
+							dimension="compact"
+							variant="ghost"
+							onclick={() => (useMnemonicForPasskey = false)}
+							disabled={phase === 'decrypting'}
+						>
+							I have my passkey — use it instead
+						</Button>
+					{/if}
 				{:else}
 					<Typography variant="small" style="color: var(--colors-medium)">
 						Your seed phrase derives the decryption key. It is not sent anywhere.
@@ -433,6 +499,15 @@
 							{newIdentityCount === 1 ? 'identity' : 'identities'} and {newAppCount}
 							{newAppCount === 1 ? 'app' : 'apps'} added to this device.
 						</Typography>
+					{/if}
+					{#if needsPasskeyRegistration}
+						<div class="warning-box">
+							<Typography variant="small">
+								<strong>No passkey registered on this device.</strong> Your account data has been restored,
+								but future sign-in requires a passkey. Go to Settings → Register a new passkey to re-enable
+								passkey authentication.
+							</Typography>
+						</div>
 					{/if}
 				</Vertical>
 			{/if}
@@ -513,6 +588,13 @@
 
 	.phrase-input:disabled {
 		opacity: 0.6;
+	}
+
+	.warning-box {
+		padding: var(--half-padding);
+		border: 1px solid var(--colors-warning, #f59e0b);
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--colors-warning, #f59e0b) 8%, transparent);
 	}
 
 	.mobile-only {
