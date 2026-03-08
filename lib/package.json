@@ -10,6 +10,14 @@
     ".": {
       "import": "./dist/swarm-id.esm.js",
       "types": "./dist/index.d.ts"
+    },
+    "./client": {
+      "import": "./dist/client.esm.js",
+      "types": "./dist/client.d.ts"
+    },
+    "./proxy": {
+      "import": "./dist/proxy.esm.js",
+      "types": "./dist/proxy-entry.d.ts"
     }
   },
   "files": [

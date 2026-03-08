@@ -242,3 +242,18 @@ export async function deriveEncryptionSeed(): Promise<Uint8Array> {
 	const seedHex = keccak256(toUtf8Bytes(signature))
 	return hexToBytes(seedHex.slice(2))
 }
+
+/**
+ * Connect wallet and return an ethers Signer for EIP-712 signing.
+ * Used by delegation certificate and any flow that needs a wallet signature
+ * without the full SIWE flow.
+ */
+export async function connectWalletSigner(): Promise<JsonRpcSigner> {
+	const wallets = await onboard.connectWallet()
+	if (wallets.length === 0) {
+		throw new Error('No ethereum wallet found')
+	}
+
+	const provider = new BrowserProvider(wallets[0].provider, 'any')
+	return await provider.getSigner()
+}

@@ -14,13 +14,35 @@
 	import CreateIdentityButton from '$lib/components/create-identity-button.svelte'
 	import Button from '$lib/components/ui/button.svelte'
 	import { sessionStore } from '$lib/stores/session.svelte'
-	import { getMasterKeyFromAccount, SeedPhraseRequiredError } from '$lib/utils/account-auth'
+	import {
+		getMasterKeyFromAccount,
+		getMasterKeyFromWallet,
+		SeedPhraseRequiredError,
+	} from '$lib/utils/account-auth'
 	import { deriveExportedKeys, toMetaMaskHex } from '$lib/utils/key-export'
 	import type { ExportedKeys } from '$lib/utils/key-export'
+	import {
+		bindPasskeyToAccount,
+		hasPasskeyBinding,
+		removePasskeyBinding,
+	} from '$lib/utils/passkey-binding'
+	import {
+		signDelegationCertificate,
+		createDelegationPayload,
+		writeDelegationCertificate,
+		storeDelegationReference,
+		getDelegationReference,
+	} from '$lib/utils/delegation-certificate'
+	import { connectWalletSigner } from '$lib/ethereum'
+	import { networkSettingsStore } from '$lib/stores/network-settings.svelte'
+	import { postageStampsStore } from '$lib/stores/postage-stamps.svelte'
+	import { Bee } from '@ethersphere/bee-js'
+	import { onMount } from 'svelte'
 
 	const identityId = $derived(page.params.id)
 	const identity = $derived(identityId ? identitiesStore.getIdentity(identityId) : undefined)
 	const account = $derived(identity ? accountsStore.getAccount(identity.accountId) : undefined)
+	const isWalletAccount = $derived(account?.type === 'ethereum')
 
 	// Feed signer address from identity (stored at creation — no masterKey needed)
 	const feedSignerAddress = $derived(identity?.feedSignerAddress)
@@ -35,6 +57,27 @@
 	let exportedKeys = $state<ExportedKeys | undefined>(undefined)
 	let exportError = $state<string | undefined>(undefined)
 	let isExporting = $state(false)
+
+	// Passkey binding state (Option A)
+	let passkeyBound = $state(false)
+	let isBindingPasskey = $state(false)
+	let bindingError = $state<string | undefined>(undefined)
+	let bindingSuccess = $state(false)
+
+	// Delegation certificate state
+	let delegationRef = $state<string | undefined>(undefined)
+	let isPublishing = $state(false)
+	let publishError = $state<string | undefined>(undefined)
+	let showDelegationConfirm = $state(false)
+
+	onMount(async () => {
+		if (account && isWalletAccount) {
+			passkeyBound = await hasPasskeyBinding(account.id.toString())
+		}
+		if (identityId) {
+			delegationRef = getDelegationReference(identityId)
+		}
+	})
 
 	$effect(() => {
 		if (identity) {
@@ -85,6 +128,88 @@
 	function handleHideKeys() {
 		exportedKeys = undefined
 		exportError = undefined
+	}
+
+	/**
+	 * Bind a device passkey for fast session start (Option A).
+	 * Requires wallet auth to get the masterKey, then registers a new
+	 * platform passkey and encrypts the masterKey with PRF output.
+	 */
+	async function handleBindPasskey() {
+		if (!account || account.type !== 'ethereum') return
+
+		try {
+			isBindingPasskey = true
+			bindingError = undefined
+			bindingSuccess = false
+
+			let key = masterKey
+			if (!key) {
+				key = await getMasterKeyFromWallet(account)
+				sessionStore.setTemporaryMasterKey(key)
+			}
+
+			const rpId = window.location.hostname
+			await bindPasskeyToAccount(account.id.toString(), key, rpId)
+			passkeyBound = true
+			bindingSuccess = true
+		} catch (err) {
+			bindingError = err instanceof Error ? err.message : 'Failed to bind passkey'
+			console.error('[Settings] Passkey binding failed:', err)
+		} finally {
+			isBindingPasskey = false
+		}
+	}
+
+	/** Remove the passkey binding — user falls back to wallet auth */
+	async function handleRemovePasskeyBinding() {
+		if (!account) return
+
+		try {
+			await removePasskeyBinding(account.id.toString())
+			passkeyBound = false
+			bindingSuccess = false
+			bindingError = undefined
+		} catch (err) {
+			bindingError = err instanceof Error ? err.message : 'Failed to remove binding'
+		}
+	}
+
+	/**
+	 * Publish a delegation certificate to Swarm.
+	 * Connects wallet → EIP-712 sign → upload to Swarm → store reference.
+	 */
+	async function handlePublishDelegation() {
+		if (!identity || !feedSignerAddress || !isWalletAccount) return
+
+		try {
+			isPublishing = true
+			publishError = undefined
+
+			const signer = await connectWalletSigner()
+
+			const cert = await signDelegationCertificate(signer, `0x${feedSignerAddress}`, identity.id)
+
+			const payload = createDelegationPayload(cert)
+
+			const stamps = postageStampsStore.stamps
+			if (stamps.length === 0) {
+				throw new Error('No postage stamp available. Create one first.')
+			}
+			const stamp = stamps[0].batchID
+
+			const bee = new Bee(networkSettingsStore.beeNodeUrl)
+			const result = await writeDelegationCertificate(bee, stamp, payload)
+
+			storeDelegationReference(signer.address, identity.id, result.reference)
+			delegationRef = result.reference
+			showDelegationConfirm = false
+		} catch (err) {
+			publishError = err instanceof Error ? err.message : 'Failed to publish certificate'
+			console.error('[Settings] Delegation publish failed:', err)
+		} finally {
+			isPublishing = false
+		}
 	}
 </script>
 
@@ -345,6 +470,152 @@
 			</Vertical>
 		{/if}
 	</Vertical>
+
+	<!-- ===== Passkey Binding (Option A — wallet accounts only) ===== -->
+	{#if isWalletAccount}
+		<Divider --margin="0" />
+
+		<Vertical --vertical-gap="var(--padding)">
+			<Typography variant="h5">Fast Signing</Typography>
+			<Typography variant="small" style="color: var(--color-text-secondary)">
+				Use a device passkey (Touch ID, Face ID, Windows Hello) to start sessions instead of your
+				wallet. Your wallet remains the primary authentication method and can always be used as a
+				fallback.
+			</Typography>
+
+			{#if passkeyBound}
+				<Vertical --vertical-gap="var(--half-padding)">
+					<Typography variant="small" style="color: var(--color-success)">
+						Passkey bound — sessions will use biometric authentication.
+					</Typography>
+					<Horizontal --horizontal-gap="var(--half-padding)">
+						<Button variant="ghost" dimension="compact" onclick={handleRemovePasskeyBinding}>
+							Remove passkey binding
+						</Button>
+					</Horizontal>
+				</Vertical>
+			{:else}
+				<Vertical --vertical-gap="var(--half-padding)">
+					<Horizontal --horizontal-gap="var(--half-padding)">
+						<Button
+							variant="ghost"
+							dimension="compact"
+							onclick={handleBindPasskey}
+							disabled={isBindingPasskey}
+						>
+							{isBindingPasskey ? 'Setting up…' : 'Add passkey for fast signing'}
+						</Button>
+					</Horizontal>
+					{#if bindingSuccess}
+						<Typography variant="small" style="color: var(--color-success)">
+							Passkey bound successfully. Future sessions will use biometric authentication.
+						</Typography>
+					{/if}
+					<Typography variant="small" style="color: var(--color-text-secondary)">
+						Requires a one-time wallet signature to set up. If you delete the passkey from your
+						device, you can always sign in with your wallet and bind a new one.
+					</Typography>
+				</Vertical>
+			{/if}
+
+			{#if bindingError}
+				<Typography variant="small" style="color: var(--color-danger)">{bindingError}</Typography>
+			{/if}
+		</Vertical>
+	{/if}
+
+	<!-- ===== Delegation Certificate (opt-in public identity — wallet accounts only) ===== -->
+	{#if isWalletAccount && feedSignerAddress}
+		<Divider --margin="0" />
+
+		<Vertical --vertical-gap="var(--padding)">
+			<Typography variant="h5">Public Identity</Typography>
+
+			{#if delegationRef}
+				<Typography variant="small" style="color: var(--color-success)">
+					This identity is publicly linked to your wallet. Anyone with the reference below can
+					verify that your feed signer is authorised by your wallet.
+				</Typography>
+				<ResponsiveLayout
+					--responsive-align-items="start"
+					--responsive-justify-content="stretch"
+					--responsive-gap="var(--quarter-padding)"
+				>
+					<Typography class={!layoutStore.mobile ? 'flex50 input-layout' : ''}
+						>Certificate reference</Typography
+					>
+					<Horizontal
+						class={!layoutStore.mobile ? 'flex50' : ''}
+						--horizontal-gap="var(--half-padding)"
+					>
+						<Input
+							variant="outline"
+							dimension="compact"
+							name="delegation-ref"
+							value={delegationRef}
+							class="grower key-input"
+							disabled
+						/>
+						<CopyButton text={delegationRef} />
+					</Horizontal>
+				</ResponsiveLayout>
+			{:else if showDelegationConfirm}
+				<Vertical
+					--vertical-gap="var(--padding)"
+					style="padding: var(--padding); border: 1px solid var(--color-warning); border-radius: var(--border-radius);"
+				>
+					<Typography variant="small" style="color: var(--color-warning)">
+						This will publicly link your feed signer address to your wallet address on Swarm. Once
+						published, this cannot be undone — Swarm data is immutable. To go private again, you
+						would need to create a new identity.
+					</Typography>
+					<Typography variant="small">
+						Your wallet will ask you to sign an EIP-712 message to prove you authorise this binding.
+						A postage stamp is required for the Swarm upload.
+					</Typography>
+					<Horizontal --horizontal-gap="var(--half-padding)">
+						<Button
+							variant="strong"
+							dimension="compact"
+							onclick={handlePublishDelegation}
+							disabled={isPublishing}
+						>
+							{isPublishing ? 'Publishing…' : 'Confirm and publish'}
+						</Button>
+						<Button
+							variant="ghost"
+							dimension="compact"
+							onclick={() => {
+								showDelegationConfirm = false
+								publishError = undefined
+							}}
+						>
+							Cancel
+						</Button>
+					</Horizontal>
+				</Vertical>
+			{:else}
+				<Typography variant="small" style="color: var(--color-text-secondary)">
+					By default, your identity is private — your feed signer address cannot be linked to your
+					wallet. You can opt in to make this identity public, allowing anyone to verify that your
+					Swarm content is genuinely from your wallet address.
+				</Typography>
+				<Horizontal --horizontal-gap="var(--half-padding)">
+					<Button
+						variant="ghost"
+						dimension="compact"
+						onclick={() => (showDelegationConfirm = true)}
+					>
+						Make this identity public
+					</Button>
+				</Horizontal>
+			{/if}
+
+			{#if publishError}
+				<Typography variant="small" style="color: var(--color-danger)">{publishError}</Typography>
+			{/if}
+		</Vertical>
+	{/if}
 
 	<Divider --margin="0" />
 

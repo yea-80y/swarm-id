@@ -8,6 +8,7 @@ import {
 	deriveMasterKeyEncryptionKeyFromEIP712,
 } from '$lib/utils/encryption'
 import { authenticateAgentAccount } from '$lib/agent-account'
+import { authenticateWithPasskeyBinding } from '$lib/utils/passkey-binding'
 import { keccak256 } from 'ethers'
 import { Bytes } from '@ethersphere/bee-js'
 
@@ -39,10 +40,14 @@ export function getMasterKeyFromAgentAccount(account: Account, seedPhrase: strin
 
 /**
  * Retrieves the master key from an account by authenticating the user.
- * For passkey accounts: Re-authenticates using WebAuthn
- * For ethereum accounts: Connects wallet and decrypts the stored master key
- * For agent accounts: Throws SeedPhraseRequiredError - caller must collect seed phrase
- *                     and use getMasterKeyFromAgentAccount
+ *
+ * For ethereum/para accounts, tries passkey binding first (Option A — fast
+ * biometric auth). Falls back to wallet auth if no binding exists or if the
+ * passkey prompt is cancelled.
+ *
+ * For passkey accounts: Re-authenticates using WebAuthn PRF
+ * For ethereum accounts: Passkey binding → wallet fallback
+ * For agent accounts: Throws SeedPhraseRequiredError
  */
 export async function getMasterKeyFromAccount(account: Account): Promise<Bytes> {
 	if (account.type === 'passkey') {
@@ -55,32 +60,59 @@ export async function getMasterKeyFromAccount(account: Account): Promise<Bytes> 
 		})
 		return passkeyAccount.masterKey
 	} else if (account.type === 'agent') {
-		// Agent accounts require the caller to collect the seed phrase via UI
 		throw new SeedPhraseRequiredError(account.id.toString())
 	} else {
-		// ethereum account — provider and scheme determine how to authenticate
-		if (account.walletProvider === 'para') {
-			// Para MPC wallet: sign via Para SDK, always eip712 scheme
-			const encryptionSeed = await deriveEncryptionSeedWithPara()
-			const encryptionKey = await deriveMasterKeyEncryptionKeyFromEIP712(
-				encryptionSeed,
-				account.encryptionSalt,
-			)
-			return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
-		} else if (account.encryptionScheme === 'eip712') {
-			// Current scheme: EIP-712 fixed-nonce signature → keccak256 → HKDF
-			const encryptionSeed = await deriveEncryptionSeed()
-			const encryptionKey = await deriveMasterKeyEncryptionKeyFromEIP712(
-				encryptionSeed,
-				account.encryptionSalt,
-			)
-			return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
-		} else {
-			// Legacy publickey scheme: HKDF(SIWE_publicKey, salt)
-			// Works for old accounts. Migrate to eip712 via account settings when convenient.
-			const signed = await connectAndSign()
-			const encryptionKey = await deriveEncryptionKey(signed.publicKey, account.encryptionSalt)
-			return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
-		}
+		// Ethereum/Para — try passkey binding first (Option A)
+		const bindingResult = await tryPasskeyBinding(account)
+		if (bindingResult) return bindingResult
+
+		// Fall back to wallet authentication
+		return await getMasterKeyFromWallet(account)
+	}
+}
+
+/**
+ * Authenticate via wallet only, bypassing passkey binding.
+ * Used when the caller explicitly needs a wallet interaction
+ * (e.g., during passkey binding setup, where we need the wallet
+ * to provide the masterKey to encrypt).
+ */
+export async function getMasterKeyFromWallet(account: Account): Promise<Bytes> {
+	if (account.type !== 'ethereum') {
+		throw new Error('getMasterKeyFromWallet only works with ethereum accounts')
+	}
+
+	if (account.walletProvider === 'para') {
+		const encryptionSeed = await deriveEncryptionSeedWithPara()
+		const encryptionKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+			encryptionSeed,
+			account.encryptionSalt,
+		)
+		return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
+	} else if (account.encryptionScheme === 'eip712') {
+		const encryptionSeed = await deriveEncryptionSeed()
+		const encryptionKey = await deriveMasterKeyEncryptionKeyFromEIP712(
+			encryptionSeed,
+			account.encryptionSalt,
+		)
+		return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
+	} else {
+		const signed = await connectAndSign()
+		const encryptionKey = await deriveEncryptionKey(signed.publicKey, account.encryptionSalt)
+		return await decryptMasterKey(account.encryptedMasterKey, encryptionKey)
+	}
+}
+
+/**
+ * Try passkey binding for ethereum/para accounts.
+ * Returns masterKey if binding exists and auth succeeds, undefined otherwise.
+ * Silently falls back on any error (cancelled, no binding, corrupted, etc.).
+ */
+async function tryPasskeyBinding(account: Account): Promise<Bytes | undefined> {
+	try {
+		const rpId = window.location.hostname
+		return await authenticateWithPasskeyBinding(account.id.toString(), rpId)
+	} catch {
+		return undefined
 	}
 }

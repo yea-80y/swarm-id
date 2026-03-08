@@ -19,6 +19,8 @@ const config: KnipConfig = {
 		'src/lib/utils/passkey-mnemonic.ts',
 		'src/lib/utils/backup-encryption.ts',
 		'src/lib/utils/account-backup.ts',
+		'src/lib/utils/passkey-binding.ts',
+		'src/lib/utils/delegation-certificate.ts',
 	],
 	ignoreDependencies: ['@swarm-id/lib', '@ethersphere/bee-js'],
 	ignoreExportsUsedInFile: true,
