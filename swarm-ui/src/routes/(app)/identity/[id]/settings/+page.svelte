@@ -37,7 +37,6 @@
 	import { networkSettingsStore } from '$lib/stores/network-settings.svelte'
 	import { postageStampsStore } from '$lib/stores/postage-stamps.svelte'
 	import { Bee } from '@ethersphere/bee-js'
-	import { onMount } from 'svelte'
 
 	const identityId = $derived(page.params.id)
 	const identity = $derived(identityId ? identitiesStore.getIdentity(identityId) : undefined)
@@ -69,13 +68,30 @@
 	let isPublishing = $state(false)
 	let publishError = $state<string | undefined>(undefined)
 	let showDelegationConfirm = $state(false)
+	let manualBatchId = $state('')
 
-	onMount(async () => {
-		if (account && isWalletAccount) {
-			passkeyBound = await hasPasskeyBinding(account.id.toString())
+	// Re-check passkey binding whenever the account changes
+	$effect(() => {
+		const currentAccount = account
+		const walletType = isWalletAccount
+		passkeyBound = false
+		bindingSuccess = false
+		bindingError = undefined
+		if (currentAccount && walletType) {
+			hasPasskeyBinding(currentAccount.id.toString()).then((bound) => {
+				passkeyBound = bound
+			})
 		}
-		if (identityId) {
-			delegationRef = getDelegationReference(identityId)
+	})
+
+	// Re-check delegation reference whenever identity changes
+	$effect(() => {
+		const currentIdentityId = identityId
+		delegationRef = undefined
+		showDelegationConfirm = false
+		publishError = undefined
+		if (currentIdentityId) {
+			delegationRef = getDelegationReference(currentIdentityId)
 		}
 	})
 
@@ -193,10 +209,10 @@
 			const payload = createDelegationPayload(cert)
 
 			const stamps = postageStampsStore.stamps
-			if (stamps.length === 0) {
-				throw new Error('No postage stamp available. Create one first.')
+			const stamp = manualBatchId.trim() || (stamps.length > 0 ? stamps[0].batchID : '')
+			if (!stamp) {
+				throw new Error('No postage stamp available. Enter a batch ID or create a stamp first.')
 			}
-			const stamp = stamps[0].batchID
 
 			const bee = new Bee(networkSettingsStore.beeNodeUrl)
 			const result = await writeDelegationCertificate(bee, stamp, payload)
@@ -471,26 +487,26 @@
 		{/if}
 	</Vertical>
 
-	<!-- ===== Passkey Binding (Option A — wallet accounts only) ===== -->
+	<!-- ===== Passkey Sign-in (Option A — wallet accounts only) ===== -->
 	{#if isWalletAccount}
 		<Divider --margin="0" />
 
 		<Vertical --vertical-gap="var(--padding)">
-			<Typography variant="h5">Fast Signing</Typography>
+			<Typography variant="h5">Passkey Sign-in</Typography>
 			<Typography variant="small" style="color: var(--color-text-secondary)">
-				Use a device passkey (Touch ID, Face ID, Windows Hello) to start sessions instead of your
-				wallet. Your wallet remains the primary authentication method and can always be used as a
-				fallback.
+				Use a device passkey (Touch ID, Face ID, Windows Hello) to sign in and start sessions
+				instead of connecting your wallet each time. Your account credentials are stored securely on
+				your device. Your wallet remains the primary authentication and recovery method.
 			</Typography>
 
 			{#if passkeyBound}
 				<Vertical --vertical-gap="var(--half-padding)">
 					<Typography variant="small" style="color: var(--color-success)">
-						Passkey bound — sessions will use biometric authentication.
+						Passkey active — sign in with biometrics instead of your wallet.
 					</Typography>
 					<Horizontal --horizontal-gap="var(--half-padding)">
 						<Button variant="ghost" dimension="compact" onclick={handleRemovePasskeyBinding}>
-							Remove passkey binding
+							Remove passkey
 						</Button>
 					</Horizontal>
 				</Vertical>
@@ -503,17 +519,17 @@
 							onclick={handleBindPasskey}
 							disabled={isBindingPasskey}
 						>
-							{isBindingPasskey ? 'Setting up…' : 'Add passkey for fast signing'}
+							{isBindingPasskey ? 'Setting up…' : 'Set up passkey sign-in'}
 						</Button>
 					</Horizontal>
 					{#if bindingSuccess}
 						<Typography variant="small" style="color: var(--color-success)">
-							Passkey bound successfully. Future sessions will use biometric authentication.
+							Passkey set up. You can now sign in with biometrics instead of your wallet.
 						</Typography>
 					{/if}
 					<Typography variant="small" style="color: var(--color-text-secondary)">
-						Requires a one-time wallet signature to set up. If you delete the passkey from your
-						device, you can always sign in with your wallet and bind a new one.
+						Requires a one-time wallet signature to set up. If you lose your passkey, you can always
+						sign in with your wallet and set up a new one.
 					</Typography>
 				</Vertical>
 			{/if}
@@ -573,6 +589,14 @@
 						Your wallet will ask you to sign an EIP-712 message to prove you authorise this binding.
 						A postage stamp is required for the Swarm upload.
 					</Typography>
+					<Input
+						variant="outline"
+						dimension="compact"
+						name="batch-id"
+						bind:value={manualBatchId}
+						placeholder="Postage batch ID (leave blank to use account stamp)"
+						class="key-input"
+					/>
 					<Horizontal --horizontal-gap="var(--half-padding)">
 						<Button
 							variant="strong"

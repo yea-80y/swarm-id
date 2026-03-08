@@ -24,12 +24,16 @@
 	import { generateDockerName } from '$lib/docker-name'
 	import Vertical from '$lib/components/ui/vertical.svelte'
 	import { deriveIdentityFeedSigner } from '$lib/utils/feed-signer'
+	import { bindPasskeyToAccount } from '$lib/utils/passkey-binding'
+	import FingerprintRecognition from 'carbon-icons-svelte/lib/FingerprintRecognition.svelte'
 
 	type StampOption = 'account' | 'separate'
 
 	let idName = $state('')
 	let selectedStampOption = $state<StampOption>('account')
 	let showStampTooltip = $state(false)
+	let enablePasskeyBinding = $state(false)
+	let passkeyBindingError = $state<string | undefined>(undefined)
 
 	// Check if this is a synced account creation
 	const isSyncedCreation = $derived(sessionStore.data.isSyncedCreation ?? false)
@@ -67,6 +71,7 @@
 	})
 
 	const accountName = $derived(sessionStore.data.account?.name ?? '')
+	const isWalletAccount = $derived(sessionStore.data.account?.type === 'ethereum')
 
 	function deriveIdentityFromAccount(account: Account, masterKey: Bytes, index: number) {
 		const identityWallet = HDNodeWallet.fromSeed(toPrefixedHex(masterKey)).deriveChild(index)
@@ -126,6 +131,21 @@
 		// Set as current account and identity
 		sessionStore.setCurrentAccount(account.id.toHex())
 		sessionStore.setCurrentIdentity(identity.id)
+
+		// Passkey binding (Option A) — non-blocking, failure doesn't prevent identity creation
+		if (enablePasskeyBinding && isWalletAccount && tempMasterKey) {
+			try {
+				const rpId = window.location.hostname
+				await bindPasskeyToAccount(account.id.toHex(), tempMasterKey, rpId)
+				console.log('✅ Passkey bound to account')
+			} catch (err) {
+				console.warn('⚠️ Passkey binding skipped:', err)
+				passkeyBindingError =
+					err instanceof Error
+						? err.message
+						: 'Passkey setup failed — you can add one later in settings.'
+			}
+		}
 
 		// Store stamp option in session for downstream pages
 		sessionStore.setStampOption(selectedStampOption)
@@ -230,6 +250,27 @@
 						</Tooltip>
 					</Horizontal>
 				{/if}
+
+				{#if isWalletAccount}
+					<Divider />
+					<Vertical --vertical-gap="var(--quarter-padding)">
+						<label class="passkey-toggle">
+							<input type="checkbox" bind:checked={enablePasskeyBinding} />
+							<FingerprintRecognition size={20} />
+							<Typography>Set up passkey sign-in</Typography>
+						</label>
+						<Typography variant="small" style="color: var(--colors-medium)">
+							Use Touch ID, Face ID, or Windows Hello to sign in instead of connecting your wallet
+							each time. Your credentials are stored securely on your device. Your wallet remains
+							the primary authentication and recovery method.
+						</Typography>
+						{#if passkeyBindingError}
+							<Typography variant="small" style="color: var(--colors-red)">
+								{passkeyBindingError}
+							</Typography>
+						{/if}
+					</Vertical>
+				{/if}
 			</Vertical>
 		{/if}
 	{/snippet}
@@ -252,6 +293,20 @@
 	.input-grow {
 		flex: 1;
 		min-width: 0;
+	}
+
+	.passkey-toggle {
+		display: flex;
+		align-items: center;
+		gap: var(--half-padding);
+		cursor: pointer;
+	}
+
+	.passkey-toggle input[type='checkbox'] {
+		width: 18px;
+		height: 18px;
+		cursor: pointer;
+		accent-color: var(--colors-ultra-high);
 	}
 
 	/* Select wrapper for custom styled select */
