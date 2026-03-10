@@ -1,14 +1,25 @@
 <script lang="ts">
+	import NetworkStatusPill from '$lib/components/network-status-pill.svelte'
+	import NetworkSettingsModal from '$lib/components/network-settings-modal.svelte'
+
 	let { children } = $props()
+
+	let networkSettingsOpen = $state(false)
 </script>
 
 <div class="page-wrapper">
+	<div class="network-trigger">
+		<NetworkStatusPill onclick={() => (networkSettingsOpen = true)} />
+	</div>
+
 	<div class="page-content">
 		<div class="content-area">
 			{@render children()}
 		</div>
 	</div>
 </div>
+
+<NetworkSettingsModal bind:open={networkSettingsOpen} />
 
 <style>
 	.page-wrapper {
@@ -19,6 +30,13 @@
 		position: relative;
 		align-items: stretch;
 		justify-content: space-around;
+	}
+
+	.network-trigger {
+		position: fixed;
+		top: var(--padding);
+		right: var(--padding);
+		z-index: 10;
 	}
 
 	.page-content {

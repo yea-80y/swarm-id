@@ -10,8 +10,12 @@
 	import { identitiesStore } from '$lib/stores/identities.svelte'
 	import { accountsStore } from '$lib/stores/accounts.svelte'
 	import Drawer from '$lib/components/drawer.svelte'
+	import NetworkStatusPill from '$lib/components/network-status-pill.svelte'
+	import NetworkSettingsModal from '$lib/components/network-settings-modal.svelte'
 
 	let { children } = $props()
+
+	let networkSettingsOpen = $state(false)
 
 	const identityId = $derived(page.params.id)
 	const identity = $derived(identityId ? identitiesStore.getIdentity(identityId) : undefined)
@@ -62,6 +66,8 @@
 						<Typography>{identity.name}</Typography>
 					</Vertical>
 				</Horizontal>
+			{:else}
+				<NetworkStatusPill onclick={() => (networkSettingsOpen = true)} />
 			{/if}
 		</Horizontal>
 
@@ -76,6 +82,8 @@
 		<Drawer bind:drawerOpen {account} {identities} {identityId} />
 	{/if}
 </div>
+
+<NetworkSettingsModal bind:open={networkSettingsOpen} />
 
 <style>
 	.page-wrapper {
